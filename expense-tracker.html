@@ -360,12 +360,24 @@ const firebaseConfig = {
   messagingSenderId: "663182612667",
   appId: "1:663182612667:web:b04d31c2dcfb2e959a719e"
 };
-firebase.initializeApp(firebaseConfig);
-const db = firebase.firestore();
-const docRef = db.collection('expense_data').doc('shared');
+let db = null;
+let docRef = null;
+let firebaseAvailable = false;
+try{
+  if(typeof firebase === 'undefined'){
+    throw new Error('Firebase SDK ยังไม่โหลด (สคริปต์จาก gstatic.com อาจถูกบล็อกโดย ad-blocker/เครือข่าย)');
+  }
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+  docRef = db.collection('expense_data').doc('shared');
+  firebaseAvailable = true;
+}catch(err){
+  console.warn('Firebase init failed, running in offline/local-only mode:', err.message);
+  firebaseAvailable = false;
+}
 
 let entries = [];
-let syncOk = true;
+let syncOk = firebaseAvailable;
 
 function todayISO(){
   const d = new Date();
@@ -409,6 +421,13 @@ function seedData(){
 
 function loadEntries(){
   return new Promise((resolve) => {
+    if(!firebaseAvailable){
+      // ทำงานแบบ offline ทั้งหมด ไม่แตะ Firestore
+      entries = seedData();
+      syncOk = false;
+      resolve();
+      return;
+    }
     let firstLoad = true;
     docRef.onSnapshot(
       (doc) => {
@@ -439,6 +458,10 @@ function loadEntries(){
   });
 }
 async function saveEntries(){
+  if(!firebaseAvailable){
+    syncOk = false;
+    return false;
+  }
   try{
     await docRef.set({ entries: entries, updatedAt: Date.now() });
     syncOk = true;
