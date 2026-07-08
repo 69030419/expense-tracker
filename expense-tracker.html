@@ -314,6 +314,70 @@
     white-space:nowrap;
   }
   .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+
+  /* ---- Chart ---- */
+  .chart-panel{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:18px;
+    padding:16px;
+    margin-bottom:18px;
+  }
+  .chart-head{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:14px;
+  }
+  .chart-head .title{ font-size:14.5px; font-weight:600; }
+  .chart-tabs{
+    display:flex; gap:4px;
+    background:var(--bg);
+    border:1px solid var(--line);
+    border-radius:100px;
+    padding:3px;
+  }
+  .chart-tab{
+    padding:6px 12px;
+    border-radius:100px;
+    font-size:12.5px;
+    color:var(--text-dim);
+    cursor:pointer;
+    user-select:none;
+  }
+  .chart-tab.active{
+    background:var(--gold);
+    color:#14171c;
+    font-weight:600;
+  }
+  .chart-svg-wrap{
+    position:relative;
+    overflow-x:auto;
+    -ms-overflow-style:none; scrollbar-width:none;
+  }
+  .chart-svg-wrap::-webkit-scrollbar{ display:none; }
+  .chart-empty{
+    text-align:center; color:var(--text-dim); font-size:13px; padding:30px 0;
+  }
+  .chart-bar{ cursor:pointer; }
+  .chart-bar rect{ transition: fill .12s ease; }
+  .chart-tooltip{
+    position:absolute;
+    background:#2a2314;
+    border:1px solid var(--gold);
+    border-radius:10px;
+    padding:6px 10px;
+    font-size:11.5px;
+    color:var(--text);
+    pointer-events:none;
+    white-space:nowrap;
+    transform:translate(-50%, -100%);
+    opacity:0;
+    transition:opacity .1s ease;
+    z-index:5;
+  }
+  .chart-tooltip.show{ opacity:1; }
+  .chart-tooltip b{ color:var(--gold); }
+  .chart-avg-line{ stroke:var(--text-dim); stroke-dasharray:3,3; stroke-width:1; }
+  .chart-avg-label{ fill:var(--text-dim); font-size:9px; font-family:'JetBrains Mono', monospace; }
 </style>
 </head>
 <body>
@@ -343,6 +407,19 @@
     </div>
     <div class="cat-grid" id="catGrid"></div>
     <button class="confirm-add-btn" id="confirmAddBtn" style="display:none;">บันทึก</button>
+  </div>
+
+  <div class="chart-panel" id="chartPanel">
+    <div class="chart-head">
+      <div class="title">แนวโน้มรายจ่าย</div>
+      <div class="chart-tabs">
+        <div class="chart-tab" data-mode="daily">รายวัน</div>
+        <div class="chart-tab" data-mode="monthly">รายเดือน</div>
+      </div>
+    </div>
+    <div class="chart-svg-wrap" id="chartSvgWrap">
+      <div id="chartTooltip" class="chart-tooltip"></div>
+    </div>
   </div>
 
   <div class="section-title">ประวัติ</div>
@@ -597,11 +674,166 @@ function deleteEntry(id, rowEl){
 }
 
 const THAI_MONTHS_FULL = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+const THAI_MONTHS_SHORT = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 let openMonths = new Set();
 let monthFilters = {};
 let editingId = null;
+let chartMode = 'daily';
 
 function monthKey(iso){ return iso.slice(0,7); }
+
+/* ---------------- Chart ---------------- */
+
+function renderChart(){
+  const wrap = document.getElementById('chartSvgWrap');
+  const tooltip = document.getElementById('chartTooltip');
+  Array.from(wrap.children).forEach(ch => { if(ch.id !== 'chartTooltip') wrap.removeChild(ch); });
+
+  if(entries.length === 0){
+    const empty = document.createElement('div');
+    empty.className = 'chart-empty';
+    empty.textContent = 'ยังไม่มีข้อมูลให้แสดงกราฟ';
+    wrap.appendChild(empty);
+    return;
+  }
+
+  let labels = [];
+  let values = [];
+  let fullLabels = [];
+
+  if(chartMode === 'daily'){
+    const days = [];
+    const now = new Date();
+    for(let i = 13; i >= 0; i--){
+      const d = new Date(now);
+      d.setDate(now.getDate() - i);
+      const iso = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+      days.push(iso);
+    }
+    const byDate = {};
+    entries.forEach(e => { byDate[e.date] = (byDate[e.date] || 0) + e.amount; });
+    days.forEach(iso => {
+      const [y,m,d] = iso.split('-').map(Number);
+      labels.push(String(d));
+      fullLabels.push(d + ' ' + THAI_MONTHS_SHORT[m-1] + (iso === todayISO() ? ' (วันนี้)' : ''));
+      values.push(byDate[iso] || 0);
+    });
+  } else {
+    const byMonth = {};
+    entries.forEach(e => {
+      const mk = monthKey(e.date);
+      byMonth[mk] = (byMonth[mk] || 0) + e.amount;
+    });
+    const mks = Object.keys(byMonth).sort((a,b) => a.localeCompare(b));
+    mks.forEach(mk => {
+      const [y,m] = mk.split('-').map(Number);
+      labels.push(THAI_MONTHS_SHORT[m-1]);
+      fullLabels.push(THAI_MONTHS_FULL[m-1] + ' ' + (y + 543));
+      values.push(byMonth[mk]);
+    });
+  }
+
+  const max = Math.max(...values, 1);
+  const avg = values.reduce((s,v) => s+v, 0) / values.length;
+
+  const barCount = values.length;
+  const barSlot = chartMode === 'daily' ? 34 : 56;
+  const chartW = Math.max(barSlot * barCount, 280);
+  const chartH = 150;
+  const padTop = 10;
+  const padBottom = 26;
+  const plotH = chartH - padTop - padBottom;
+  const barW = Math.min(barSlot - 10, 30);
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('width', chartW);
+  svg.setAttribute('height', chartH);
+  svg.setAttribute('viewBox', `0 0 ${chartW} ${chartH}`);
+  svg.style.display = 'block';
+
+  if(avg > 0){
+    const avgY = padTop + plotH - (avg / max) * plotH;
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', 0);
+    line.setAttribute('x2', chartW);
+    line.setAttribute('y1', avgY);
+    line.setAttribute('y2', avgY);
+    line.setAttribute('class', 'chart-avg-line');
+    svg.appendChild(line);
+
+    const avgLabel = document.createElementNS(svgNS, 'text');
+    avgLabel.setAttribute('x', 4);
+    avgLabel.setAttribute('y', avgY - 4);
+    avgLabel.setAttribute('class', 'chart-avg-label');
+    avgLabel.textContent = 'เฉลี่ย ฿' + fmtNum(avg);
+    svg.appendChild(avgLabel);
+  }
+
+  values.forEach((v, i) => {
+    const slotX = i * barSlot;
+    const barH = max > 0 ? (v / max) * plotH : 0;
+    const x = slotX + (barSlot - barW) / 2;
+    const y = padTop + plotH - barH;
+
+    const g = document.createElementNS(svgNS, 'g');
+    g.setAttribute('class', 'chart-bar');
+
+    const rect = document.createElementNS(svgNS, 'rect');
+    rect.setAttribute('x', x);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', barW);
+    rect.setAttribute('height', Math.max(barH, v > 0 ? 2 : 0));
+    rect.setAttribute('rx', 5);
+    const isToday = chartMode === 'daily' && i === values.length - 1;
+    rect.setAttribute('fill', isToday ? '#e8b04b' : (v > 0 ? '#7a6636' : '#2c323d'));
+    g.appendChild(rect);
+
+    const label = document.createElementNS(svgNS, 'text');
+    label.setAttribute('x', slotX + barSlot / 2);
+    label.setAttribute('y', chartH - 8);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('font-size', '10');
+    label.setAttribute('font-family', 'JetBrains Mono, monospace');
+    label.setAttribute('fill', '#8891a0');
+    label.textContent = labels[i];
+    g.appendChild(label);
+
+    g.addEventListener('mouseenter', () => showTip(g, fullLabels[i], v));
+    g.addEventListener('touchstart', () => showTip(g, fullLabels[i], v), {passive:true});
+    g.addEventListener('mouseleave', hideTip);
+
+    svg.appendChild(g);
+  });
+
+  wrap.insertBefore(svg, tooltip);
+
+  if(chartMode === 'daily'){
+    requestAnimationFrame(() => { wrap.scrollLeft = wrap.scrollWidth; });
+  }
+
+  function showTip(g, label, val){
+    const rect = g.querySelector('rect');
+    const bx = parseFloat(rect.getAttribute('x')) + parseFloat(rect.getAttribute('width'))/2;
+    const by = parseFloat(rect.getAttribute('y'));
+    tooltip.innerHTML = `${label}<br><b>฿${fmtNum(val)}</b>`;
+    tooltip.style.left = bx + 'px';
+    tooltip.style.top = by + 'px';
+    tooltip.classList.add('show');
+  }
+  function hideTip(){ tooltip.classList.remove('show'); }
+}
+
+function initChartTabs(){
+  document.querySelectorAll('.chart-tab').forEach(tab => {
+    if(tab.dataset.mode === chartMode) tab.classList.add('active');
+    tab.addEventListener('click', () => {
+      chartMode = tab.dataset.mode;
+      document.querySelectorAll('.chart-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === chartMode));
+      renderChart();
+    });
+  });
+}
 
 function renderHistory(){
   const container = document.getElementById('history');
@@ -817,6 +1049,7 @@ function renderSummary(){
 function renderAll(){
   renderSummary();
   renderHistory();
+  renderChart();
 }
 
 function exportData(){
@@ -862,6 +1095,7 @@ function importData(file){
 
 async function init(){
   renderCatGrid();
+  initChartTabs();
   await loadEntries();
   renderAll();
 
