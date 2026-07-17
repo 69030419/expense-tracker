@@ -67,14 +67,30 @@
     font-size:120px; font-weight:700; color:rgba(232,176,75,0.06);
     font-family:'JetBrains Mono', monospace;
   }
+  .balance-head{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    position:relative; z-index:1;
+  }
   .balance .label{ font-size:13px; color:var(--text-dim); letter-spacing:.03em; }
   .sync-dot{
     display:inline-block; width:7px; height:7px; border-radius:50%;
     background:var(--green); margin-left:4px; vertical-align:middle;
   }
   .sync-dot.off{ background:var(--red); }
-  .balance .amount{ font-size:38px; font-weight:700; color:var(--gold); margin-top:4px; }
-  .balance .sub{ font-size:12.5px; color:var(--text-dim); margin-top:8px; display:flex; gap:14px; }
+  .month-select{
+    background:var(--bg);
+    border:1px solid var(--line);
+    border-radius:100px;
+    color:var(--gold);
+    font-family:'Kanit', sans-serif;
+    font-size:12.5px;
+    font-weight:600;
+    padding:6px 10px;
+    outline:none;
+    position:relative; z-index:1;
+  }
+  .balance .amount{ font-size:38px; font-weight:700; color:var(--gold); margin-top:4px; position:relative; z-index:1; }
+  .balance .sub{ font-size:12.5px; color:var(--text-dim); margin-top:8px; display:flex; gap:14px; position:relative; z-index:1; }
   .balance .sub b{ color:var(--text); font-weight:600; }
 
   .panel{
@@ -401,10 +417,13 @@
   </div>
 
   <div class="balance">
-    <div class="label">ยอดใช้จ่ายทั้งหมด <span id="syncDot" class="sync-dot" title="เชื่อมต่อ sync"></span></div>
+    <div class="balance-head">
+      <div class="label">ยอดใช้จ่าย <span id="syncDot" class="sync-dot" title="เชื่อมต่อ sync"></span></div>
+      <select id="monthSelector" class="month-select"></select>
+    </div>
     <div class="amount mono">฿<span id="grandTotal">0</span></div>
     <div class="sub">
-      <div>วันนี้ <b class="mono" id="todayTotal">0</b> ฿</div>
+      <div id="subToday">วันนี้ <b class="mono" id="todayTotal">0</b> ฿</div>
       <div><span id="dayCount">0</span> วัน</div>
     </div>
   </div>
@@ -692,8 +711,46 @@ let openMonthsInitialized = false;
 let monthFilters = {};
 let editingId = null;
 let chartMode = 'daily';
+let selectedSummaryMonth = 'all'; // 'all' or 'YYYY-MM'
+let summarySelectorInitialized = false;
 
 function monthKey(iso){ return iso.slice(0,7); }
+
+/* ---------------- Month selector ---------------- */
+
+function renderMonthSelector(){
+  const sel = document.getElementById('monthSelector');
+  if(!sel) return;
+
+  const mks = Array.from(new Set(entries.map(e => monthKey(e.date)))).sort((a,b) => b.localeCompare(a));
+
+  // Default to the current month the first time we have data (fallback to 'all' if no entries this month)
+  if(!summarySelectorInitialized){
+    const curMk = monthKey(todayISO());
+    selectedSummaryMonth = mks.includes(curMk) ? curMk : 'all';
+    summarySelectorInitialized = true;
+  }
+  // If a previously selected month no longer exists, fall back to 'all'
+  if(selectedSummaryMonth !== 'all' && !mks.includes(selectedSummaryMonth)){
+    selectedSummaryMonth = 'all';
+  }
+
+  sel.innerHTML = '';
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = 'ทั้งหมด';
+  sel.appendChild(allOpt);
+
+  mks.forEach(mk => {
+    const [y,m] = mk.split('-').map(Number);
+    const opt = document.createElement('option');
+    opt.value = mk;
+    opt.textContent = THAI_MONTHS_FULL[m-1] + ' ' + (y + 543);
+    sel.appendChild(opt);
+  });
+
+  sel.value = selectedSummaryMonth;
+}
 
 /* ---------------- Chart ---------------- */
 
@@ -1062,10 +1119,16 @@ function buildEntryRow(e){
 }
 
 function renderSummary(){
-  const grand = entries.reduce((s,e) => s + e.amount, 0);
+  renderMonthSelector();
+
+  const inMonth = selectedSummaryMonth === 'all'
+    ? entries
+    : entries.filter(e => monthKey(e.date) === selectedSummaryMonth);
+
+  const grand = inMonth.reduce((s,e) => s + e.amount, 0);
   const today = todayISO();
   const todaySum = entries.filter(e => e.date === today).reduce((s,e) => s + e.amount, 0);
-  const dayCount = new Set(entries.map(e => e.date)).size;
+  const dayCount = new Set(inMonth.map(e => e.date)).size;
 
   const dot = document.getElementById('syncDot');
   if(dot){
@@ -1074,8 +1137,17 @@ function renderSummary(){
   }
 
   document.getElementById('grandTotal').textContent = fmtNum(grand);
-  document.getElementById('todayTotal').textContent = fmtNum(todaySum);
   document.getElementById('dayCount').textContent = dayCount;
+
+  // "วันนี้" only makes sense when viewing "ทั้งหมด" or the current month
+  const subToday = document.getElementById('subToday');
+  const curMk = monthKey(today);
+  if(selectedSummaryMonth === 'all' || selectedSummaryMonth === curMk){
+    subToday.style.display = '';
+    document.getElementById('todayTotal').textContent = fmtNum(todaySum);
+  } else {
+    subToday.style.display = 'none';
+  }
 
   updateOfflineBanner();
 }
@@ -1137,6 +1209,11 @@ async function init(){
   document.getElementById('amountInput').addEventListener('input', updateConfirmButton);
   document.getElementById('amountInput').addEventListener('keydown', (e) => {
     if(e.key === 'Enter') e.target.blur();
+  });
+
+  document.getElementById('monthSelector').addEventListener('change', (e) => {
+    selectedSummaryMonth = e.target.value;
+    renderSummary();
   });
 
   document.getElementById('exportBtn').addEventListener('click', exportData);
