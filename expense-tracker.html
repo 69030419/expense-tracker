@@ -212,6 +212,18 @@
 
   .entry.editing{ padding:12px 12px; cursor:default; }
   .edit-form{ width:100%; }
+  .edit-date-row{
+    display:flex; align-items:center; gap:8px;
+    background:var(--bg); border:1px solid var(--line); border-radius:12px;
+    padding:8px 12px; margin-bottom:8px;
+  }
+  .edit-date-row .cal-ic{ font-size:14px; color:var(--gold-dim); }
+  .edit-date{
+    flex:1; background:transparent; border:none; outline:none;
+    font-family:'JetBrains Mono', monospace;
+    font-size:13.5px; color:var(--text);
+    color-scheme: dark;
+  }
   .edit-row1{
     display:flex; align-items:center; gap:8px;
     background:var(--bg); border:1px solid var(--line); border-radius:12px;
@@ -676,6 +688,7 @@ function deleteEntry(id, rowEl){
 const THAI_MONTHS_FULL = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
 const THAI_MONTHS_SHORT = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 let openMonths = new Set();
+let openMonthsInitialized = false;
 let monthFilters = {};
 let editingId = null;
 let chartMode = 'daily';
@@ -739,8 +752,9 @@ function renderChart(){
   const barCount = values.length;
   const barSlot = chartMode === 'daily' ? 34 : 56;
   const chartW = Math.max(barSlot * barCount, 280);
-  const chartH = 150;
-  const padTop = 10;
+  // Taller chart so big spikes don't crush the smaller bars flat
+  const chartH = 260;
+  const padTop = 14;
   const padBottom = 26;
   const plotH = chartH - padTop - padBottom;
   const barW = Math.min(barSlot - 10, 30);
@@ -852,8 +866,12 @@ function renderHistory(){
   });
   const monthKeys = Object.keys(byMonth).sort((a,b) => b.localeCompare(a));
 
-  if(openMonths.size === 0 && monthKeys.length){
+  // Only auto-open the latest month the first time history is ever rendered.
+  // Previously this re-ran on every render once the set emptied out, which
+  // meant closing the newest month would immediately force it back open.
+  if(!openMonthsInitialized && monthKeys.length){
     openMonths.add(monthKeys[0]);
+    openMonthsInitialized = true;
   }
 
   monthKeys.forEach(mk => {
@@ -965,6 +983,10 @@ function buildEntryRow(e){
     `).join('');
     row.innerHTML = `
       <div class="edit-form">
+        <div class="edit-date-row">
+          <span class="cal-ic">📅</span>
+          <input class="edit-date mono" type="date" value="${e.date}" />
+        </div>
         <div class="edit-row1">
           <span class="baht">฿</span>
           <input class="edit-amount mono" type="number" inputmode="decimal" value="${e.amount}" />
@@ -995,12 +1017,24 @@ function buildEntryRow(e){
       ev.stopPropagation();
       const newAmt = parseFloat(row.querySelector('.edit-amount').value);
       const newNote = row.querySelector('.edit-note').value.trim();
+      const newDate = row.querySelector('.edit-date').value;
       if(!newAmt || newAmt <= 0) return;
+      if(!newDate) return;
       const target = entries.find(x => x.id === e.id);
       if(target){
+        // Keep the same time-of-day offset when the date changes, so
+        // ordering within a day still makes sense.
+        const oldMidnight = new Date(target.date + 'T00:00:00').getTime();
+        let timeOffset = target.ts - oldMidnight;
+        if(isNaN(timeOffset) || timeOffset < 0) timeOffset = 0;
+
         target.amount = newAmt;
         target.note = newNote;
         target.category = tempCat;
+        target.date = newDate;
+
+        const newMidnight = new Date(newDate + 'T00:00:00').getTime();
+        target.ts = newMidnight + timeOffset;
       }
       editingId = null;
       await saveEntries();
