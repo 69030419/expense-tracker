@@ -174,6 +174,7 @@
     cursor:pointer;
   }
   .confirm-add-btn:active{ opacity:0.85; }
+  .confirm-add-btn:disabled{ opacity:0.6; cursor:default; }
 
   .month-card{
     background:var(--card);
@@ -478,6 +479,13 @@ const CATEGORIES = [
 ];
 const catMap = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
+/* ปลอดภัยจาก XSS: escape ก่อนแทรกลง innerHTML ทุกจุดที่มาจากข้อมูล user (เช่น note) */
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
 const firebaseConfig = {
   apiKey: "AIzaSyC9JlotoMNgm20eSeBQl1TKorojWnM_bZ4",
   authDomain: "expenses-5f5d0.firebaseapp.com",
@@ -541,7 +549,8 @@ function seedData(){
     category: r[1],
     amount: r[2],
     note: r[3],
-    ts: new Date(r[0]).getTime() + i
+    // ใช้ 'T00:00:00' (เวลา local) ให้สม่ำเสมอกับตอนแก้ไขวันที่ ไม่ใช่ new Date(r[0]) เฉยๆ ซึ่งตีความเป็น UTC
+    ts: new Date(r[0]+'T00:00:00').getTime() + i
   }));
 }
 
@@ -628,7 +637,7 @@ function renderCatGrid(){
     const btn = document.createElement('div');
     btn.className = 'cat-btn';
     btn.dataset.catId = cat.id;
-    btn.innerHTML = `<div class="ic">${cat.icon}</div><div>${cat.name}</div>`;
+    btn.innerHTML = `<div class="ic">${cat.icon}</div><div>${esc(cat.name)}</div>`;
     btn.addEventListener('click', () => onCategorySelect(cat.id));
     grid.appendChild(btn);
   });
@@ -653,35 +662,49 @@ function onCategorySelect(catId){
   updateConfirmButton();
 }
 
+/* กันกดปุ่ม "บันทึก" รัวจนได้รายการซ้ำตอนเน็ตช้า */
+let isAdding = false;
+
 async function confirmAdd(){
+  if(isAdding) return;
+
   const input = document.getElementById('amountInput');
   const noteInput = document.getElementById('noteInput');
   const val = parseFloat(input.value);
   if(!selectedCat || !val || val <= 0) return;
 
-  const note = noteInput.value.trim();
-  const entry = {
-    id: Date.now() + '-' + Math.random().toString(36).slice(2,7),
-    date: todayISO(),
-    category: selectedCat,
-    amount: val,
-    note: note,
-    ts: Date.now()
-  };
-  entries.unshift(entry);
-  const saved = await saveEntries();
+  isAdding = true;
+  const confirmBtn = document.getElementById('confirmAddBtn');
+  confirmBtn.disabled = true;
 
-  const catName = catMap[selectedCat].name;
-  input.value = '';
-  noteInput.value = '';
-  selectedCat = null;
-  document.querySelectorAll('.cat-btn').forEach(el => el.classList.remove('armed'));
-  updateConfirmButton();
+  try{
+    const note = noteInput.value.trim();
+    const entry = {
+      id: Date.now() + '-' + Math.random().toString(36).slice(2,7),
+      date: todayISO(),
+      category: selectedCat,
+      amount: val,
+      note: note,
+      ts: Date.now()
+    };
+    entries.unshift(entry);
+    const saved = await saveEntries();
 
-  showToast(saved
-    ? `บันทึก ${catName}${note ? ' · '+note : ''} ฿${fmtNum(val)}`
-    : `เพิ่มแล้ว (ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ)`);
-  renderAll();
+    const catName = catMap[selectedCat].name;
+    input.value = '';
+    noteInput.value = '';
+    selectedCat = null;
+    document.querySelectorAll('.cat-btn').forEach(el => el.classList.remove('armed'));
+    updateConfirmButton();
+
+    showToast(saved
+      ? `บันทึก ${catName}${note ? ' · '+note : ''} ฿${fmtNum(val)}`
+      : `เพิ่มแล้ว (ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ)`);
+    renderAll();
+  } finally {
+    isAdding = false;
+    confirmBtn.disabled = false;
+  }
 }
 
 function deleteEntry(id, rowEl){
@@ -724,13 +747,11 @@ function renderMonthSelector(){
 
   const mks = Array.from(new Set(entries.map(e => monthKey(e.date)))).sort((a,b) => b.localeCompare(a));
 
-  // Default to the current month the first time we have data (fallback to 'all' if no entries this month)
   if(!summarySelectorInitialized){
     const curMk = monthKey(todayISO());
     selectedSummaryMonth = mks.includes(curMk) ? curMk : 'all';
     summarySelectorInitialized = true;
   }
-  // If a previously selected month no longer exists, fall back to 'all'
   if(selectedSummaryMonth !== 'all' && !mks.includes(selectedSummaryMonth)){
     selectedSummaryMonth = 'all';
   }
@@ -809,7 +830,6 @@ function renderChart(){
   const barCount = values.length;
   const barSlot = chartMode === 'daily' ? 34 : 56;
   const chartW = Math.max(barSlot * barCount, 280);
-  // Taller chart so big spikes don't crush the smaller bars flat
   const chartH = 260;
   const padTop = 14;
   const padBottom = 26;
@@ -887,7 +907,7 @@ function renderChart(){
     const rect = g.querySelector('rect');
     const bx = parseFloat(rect.getAttribute('x')) + parseFloat(rect.getAttribute('width'))/2;
     const by = parseFloat(rect.getAttribute('y'));
-    tooltip.innerHTML = `${label}<br><b>฿${fmtNum(val)}</b>`;
+    tooltip.innerHTML = `${esc(label)}<br><b>฿${fmtNum(val)}</b>`;
     tooltip.style.left = bx + 'px';
     tooltip.style.top = by + 'px';
     tooltip.classList.add('show');
@@ -923,9 +943,6 @@ function renderHistory(){
   });
   const monthKeys = Object.keys(byMonth).sort((a,b) => b.localeCompare(a));
 
-  // Only auto-open the latest month the first time history is ever rendered.
-  // Previously this re-ran on every render once the set emptied out, which
-  // meant closing the newest month would immediately force it back open.
   if(!openMonthsInitialized && monthKeys.length){
     openMonths.add(monthKeys[0]);
     openMonthsInitialized = true;
@@ -975,7 +992,7 @@ function renderHistory(){
         const cat = catMap[catId];
         const chip = document.createElement('div');
         chip.className = 'chip' + (activeFilter === catId ? ' active' : '');
-        chip.innerHTML = `${cat.icon} ${cat.name} <span class="chip-amt mono">฿${fmtNum(catTotals[catId])}</span>`;
+        chip.innerHTML = `${cat.icon} ${esc(cat.name)} <span class="chip-amt mono">฿${fmtNum(catTotals[catId])}</span>`;
         chip.addEventListener('click', (ev) => {
           ev.stopPropagation();
           monthFilters[mk] = (monthFilters[mk] === catId) ? null : catId;
@@ -1042,12 +1059,12 @@ function buildEntryRow(e){
       <div class="edit-form">
         <div class="edit-date-row">
           <span class="cal-ic">📅</span>
-          <input class="edit-date mono" type="date" value="${e.date}" />
+          <input class="edit-date mono" type="date" value="${esc(e.date)}" />
         </div>
         <div class="edit-row1">
           <span class="baht">฿</span>
-          <input class="edit-amount mono" type="number" inputmode="decimal" value="${e.amount}" />
-          <input class="edit-note" type="text" placeholder="รายละเอียด" value="${e.note ? e.note.replace(/"/g,'&quot;') : ''}" />
+          <input class="edit-amount mono" type="number" inputmode="decimal" value="${esc(e.amount)}" />
+          <input class="edit-note" type="text" placeholder="รายละเอียด" value="${esc(e.note)}" />
         </div>
         <div class="mini-cat-row">${catIcons}</div>
         <div class="edit-actions">
@@ -1079,8 +1096,6 @@ function buildEntryRow(e){
       if(!newDate) return;
       const target = entries.find(x => x.id === e.id);
       if(target){
-        // Keep the same time-of-day offset when the date changes, so
-        // ordering within a day still makes sense.
         const oldMidnight = new Date(target.date + 'T00:00:00').getTime();
         let timeOffset = target.ts - oldMidnight;
         if(isNaN(timeOffset) || timeOffset < 0) timeOffset = 0;
@@ -1103,7 +1118,7 @@ function buildEntryRow(e){
   row.innerHTML = `
     <div class="left">
       <div class="ic">${cat.icon}</div>
-      <div class="cat-name">${cat.name}${e.note ? ' <span class="note-tag">· '+e.note+'</span>' : ''}</div>
+      <div class="cat-name">${esc(cat.name)}${e.note ? ' <span class="note-tag">· '+esc(e.note)+'</span>' : ''}</div>
     </div>
     <div style="display:flex;align-items:center;">
       <div class="amt mono">฿${fmtNum(e.amount)}</div>
@@ -1139,7 +1154,6 @@ function renderSummary(){
   document.getElementById('grandTotal').textContent = fmtNum(grand);
   document.getElementById('dayCount').textContent = dayCount;
 
-  // "วันนี้" only makes sense when viewing "ทั้งหมด" or the current month
   const subToday = document.getElementById('subToday');
   const curMk = monthKey(today);
   if(selectedSummaryMonth === 'all' || selectedSummaryMonth === curMk){
@@ -1153,8 +1167,12 @@ function renderSummary(){
 }
 
 function renderAll(){
+  // ถ้ากำลังแก้ไขรายการอยู่ ไม่ re-render ประวัติทับฟอร์มที่พิมพ์ค้างอยู่
+  // (กันกรณี snapshot จากเครื่องอื่นมาแทรกกลางทาง ทำให้สิ่งที่พิมพ์อยู่หาย)
   renderSummary();
-  renderHistory();
+  if(!editingId){
+    renderHistory();
+  }
   renderChart();
 }
 
