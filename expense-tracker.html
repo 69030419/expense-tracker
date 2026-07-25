@@ -1336,16 +1336,34 @@ function importData(file){
       const existingIds = new Set(entries.map(x => x.id));
       const merged = [...entries];
       let addedCount = 0;
+      let skippedCount = 0;
       imported.forEach(item => {
-        if(item && item.id && !existingIds.has(item.id)){
-          merged.push(item);
-          addedCount++;
+        if(!item || !item.id || existingIds.has(item.id)) return;
+
+        const validDate = typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date);
+        const amt = Number(item.amount);
+        const validAmount = Number.isFinite(amt) && amt > 0;
+        if(!validDate || !validAmount){
+          skippedCount++;
+          return;
         }
+
+        merged.push({
+          id: item.id,
+          date: item.date,
+          category: catMap[item.category] ? item.category : 'other',
+          amount: amt,
+          note: typeof item.note === 'string' ? item.note : '',
+          ts: Number.isFinite(item.ts) ? item.ts : new Date(item.date + 'T00:00:00').getTime()
+        });
+        addedCount++;
       });
       entries = merged;
       await saveEntries();
       renderAll();
-      showToast(`นำเข้าแล้ว เพิ่ม ${addedCount} รายการ`);
+      showToast(skippedCount > 0
+        ? `นำเข้าแล้ว เพิ่ม ${addedCount} รายการ (ข้าม ${skippedCount} รายการที่ข้อมูลไม่ถูกต้อง)`
+        : `นำเข้าแล้ว เพิ่ม ${addedCount} รายการ`);
     }catch(err){
       showToast('ไฟล์ไม่ถูกต้อง นำเข้าไม่ได้');
     }
