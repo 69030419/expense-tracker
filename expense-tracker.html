@@ -363,9 +363,12 @@
     border:1px solid var(--line);
     border-radius:100px;
     padding:3px;
+    margin-bottom:16px;
   }
   .chart-tab{
-    padding:6px 12px;
+    flex:1;
+    text-align:center;
+    padding:8px 12px;
     border-radius:100px;
     font-size:12.5px;
     color:var(--text-dim);
@@ -377,6 +380,20 @@
     color:#14171c;
     font-weight:600;
   }
+  .period-head{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:14px;
+  }
+  .period-head .p-title{ font-size:14px; font-weight:600; color:var(--text); }
+  .period-head .cal{ font-size:15px; color:var(--gold-dim); }
+  .stat-row{
+    display:flex; gap:24px;
+    margin-bottom:16px;
+  }
+  .stat{ flex:1; }
+  .stat .lbl{ font-size:11.5px; color:var(--text-dim); margin-bottom:3px; }
+  .stat .val{ font-size:18px; font-weight:700; color:var(--text); }
+  .stat.avg .val{ color:var(--gold); }
   .chart-svg-wrap{
     position:relative;
     overflow-x:auto;
@@ -391,6 +408,14 @@
   .chart-svg-wrap:has(.chart-bar.selected) .chart-bar:not(.selected){ opacity:.55; }
   .chart-avg-line{ stroke:var(--text-dim); stroke-dasharray:3,3; stroke-width:1; }
   .chart-avg-label{ fill:var(--text-dim); font-size:9px; font-family:'JetBrains Mono', monospace; }
+  .chart-track{ fill: rgba(255,255,255,0.06); }
+  .chart-fill-normal{ fill: var(--gold-dim); transition: fill .12s ease; }
+  .chart-fill-selected{ fill: var(--green); }
+  .chart-bar:hover .chart-fill-normal{ fill: #8a7440; }
+  .grid-line{ stroke: rgba(255,255,255,0.12); stroke-width:1; stroke-dasharray:3,3; }
+  .grid-label{ fill: var(--text-dim); font-size:9.5px; font-family:'JetBrains Mono', monospace; }
+  .day-label{ fill: var(--text-dim); font-size:10px; font-family:'JetBrains Mono', monospace; }
+  .day-label.today{ fill: var(--gold); font-weight:700; }
   .chart-detail{
     margin-top:14px;
     background:var(--bg);
@@ -415,18 +440,6 @@
   .chart-detail-row .name{ display:flex; align-items:center; gap:6px; }
   .chart-detail-row .name .dot{ width:8px; height:8px; border-radius:3px; flex:none; }
   .chart-detail-row .amt{ color:var(--text); font-weight:600; font-family:'JetBrains Mono', monospace; }
-  .chart-legend{
-    display:flex; flex-wrap:wrap; gap:10px 14px;
-    margin-top:14px; padding-top:12px;
-    border-top:1px solid var(--line);
-  }
-  .chart-legend-item{
-    display:flex; align-items:center; gap:6px;
-    font-size:11.5px; color:var(--text-dim);
-  }
-  .chart-legend-dot{
-    width:9px; height:9px; border-radius:3px; flex:none;
-  }
 </style>
 </head>
 <body>
@@ -462,13 +475,27 @@
   </div>
 
   <div class="chart-panel" id="chartPanel">
-    <div class="chart-head">
-      <div class="title">แนวโน้มรายจ่าย</div>
-      <div class="chart-tabs">
-        <div class="chart-tab" data-mode="weekly">รายสัปดาห์</div>
-        <div class="chart-tab" data-mode="monthly">รายเดือน</div>
+    <div class="chart-tabs">
+      <div class="chart-tab" data-mode="weekly">รายสัปดาห์</div>
+      <div class="chart-tab" data-mode="monthly">รายเดือน</div>
+    </div>
+
+    <div class="period-head">
+      <div class="p-title" id="periodTitle">แนวโน้มรายจ่าย</div>
+      <div class="cal">📅</div>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat">
+        <div class="lbl">การใช้จ่ายทั้งหมด</div>
+        <div class="val mono" id="chartStatTotal">฿0</div>
+      </div>
+      <div class="stat avg">
+        <div class="lbl">การใช้จ่ายเฉลี่ย</div>
+        <div class="val mono" id="chartStatAvg">฿0</div>
       </div>
     </div>
+
     <div class="chart-svg-wrap" id="chartSvgWrap"></div>
     <div class="chart-detail" id="chartDetail">
       <div class="chart-detail-empty" id="chartDetailEmpty">แตะแท่งกราฟเพื่อดูรายละเอียด</div>
@@ -480,7 +507,6 @@
         <div class="chart-detail-rows" id="chartDetailRows"></div>
       </div>
     </div>
-    <div class="chart-legend" id="chartLegend"></div>
   </div>
 
   <div class="section-title">ประวัติ</div>
@@ -818,9 +844,10 @@ function emptyCatSums(){
 
 function renderChart(){
   const wrap = document.getElementById('chartSvgWrap');
-  const legend = document.getElementById('chartLegend');
+  const periodTitleEl = document.getElementById('periodTitle');
+  const statTotalEl = document.getElementById('chartStatTotal');
+  const statAvgEl = document.getElementById('chartStatAvg');
   wrap.innerHTML = '';
-  if(legend) legend.innerHTML = '';
   hideDetail();
 
   if(entries.length === 0){
@@ -828,6 +855,9 @@ function renderChart(){
     empty.className = 'chart-empty';
     empty.textContent = 'ยังไม่มีข้อมูลให้แสดงกราฟ';
     wrap.appendChild(empty);
+    if(periodTitleEl) periodTitleEl.textContent = 'แนวโน้มรายจ่าย';
+    if(statTotalEl) statTotalEl.textContent = '฿0';
+    if(statAvgEl) statAvgEl.textContent = '฿0';
     return;
   }
 
@@ -836,6 +866,7 @@ function renderChart(){
   let fullLabels = [];
   let stacks = []; // per-bar { catId: amount }
   let currentFlags = []; // marks the bar representing "now" (this week / this month)
+  let periodTitle = 'แนวโน้มรายจ่าย';
 
   if(chartMode === 'weekly'){
     let mk = selectedSummaryMonth;
@@ -847,6 +878,7 @@ function renderChart(){
     const daysInMonth = new Date(y, m, 0).getDate();
     const todayIso = todayISO();
     const todayInThisMonth = monthKey(todayIso) === mk ? Number(todayIso.slice(8,10)) : -1;
+    periodTitle = THAI_MONTHS_FULL[m-1] + ' ' + (y + 543);
 
     for(let start = 1; start <= daysInMonth; start += 7){
       const end = Math.min(start + 6, daysInMonth);
@@ -876,6 +908,7 @@ function renderChart(){
     });
     const mks = Object.keys(byMonth).sort((a,b) => a.localeCompare(b));
     const curMk = monthKey(todayISO());
+    periodTitle = 'ภาพรวมรายเดือน';
     mks.forEach(mk => {
       const [y,m] = mk.split('-').map(Number);
       const catSums = byMonth[mk];
@@ -888,17 +921,27 @@ function renderChart(){
     });
   }
 
+  if(periodTitleEl) periodTitleEl.textContent = periodTitle;
+
+  const grandTotal = values.reduce((s,v) => s+v, 0);
+  const activeBars = values.filter(v => v > 0).length || 1;
+  const avg = grandTotal / activeBars;
+  if(statTotalEl) statTotalEl.textContent = '฿' + fmtNum(grandTotal);
+  if(statAvgEl) statAvgEl.textContent = '฿' + fmtNum(avg);
+
   const max = Math.max(...values, 1);
-  const avg = values.reduce((s,v) => s+v, 0) / values.length;
 
   const barCount = values.length;
-  const barSlot = chartMode === 'weekly' ? 50 : 56;
-  const chartW = Math.max(barSlot * barCount, 280);
-  const chartH = 260;
-  const padTop = 14;
-  const padBottom = 26;
+  const minBarSlot = chartMode === 'weekly' ? 52 : 62;
+  const containerWidth = wrap.clientWidth || 380;
+  const barSlot = Math.max(minBarSlot, containerWidth / barCount);
+  const chartW = Math.max(barSlot * barCount, containerWidth);
+  const chartH = 220;
+  const padTop = 20;
+  const padBottom = 24;
   const plotH = chartH - padTop - padBottom;
-  const barW = Math.min(barSlot - 10, 30);
+  const barW = chartMode === 'weekly' ? 26 : 32;
+  const r = barW / 2;
 
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
@@ -907,25 +950,25 @@ function renderChart(){
   svg.setAttribute('viewBox', `0 0 ${chartW} ${chartH}`);
   svg.style.display = 'block';
 
-  if(avg > 0){
-    const avgY = padTop + plotH - (avg / max) * plotH;
+  // gridlines: 0 / mid / max, with value labels on the right
+  [0, 0.5, 1].forEach(f => {
+    const y = padTop + plotH - f * plotH;
     const line = document.createElementNS(svgNS, 'line');
     line.setAttribute('x1', 0);
     line.setAttribute('x2', chartW);
-    line.setAttribute('y1', avgY);
-    line.setAttribute('y2', avgY);
-    line.setAttribute('class', 'chart-avg-line');
+    line.setAttribute('y1', y);
+    line.setAttribute('y2', y);
+    line.setAttribute('class', 'grid-line');
     svg.appendChild(line);
 
-    const avgLabel = document.createElementNS(svgNS, 'text');
-    avgLabel.setAttribute('x', 4);
-    avgLabel.setAttribute('y', avgY - 4);
-    avgLabel.setAttribute('class', 'chart-avg-label');
-    avgLabel.textContent = 'เฉลี่ย ฿' + fmtNum(avg);
-    svg.appendChild(avgLabel);
-  }
-
-  const usedCatIds = new Set();
+    const gLabel = document.createElementNS(svgNS, 'text');
+    gLabel.setAttribute('x', chartW - 4);
+    gLabel.setAttribute('y', y - 4);
+    gLabel.setAttribute('text-anchor', 'end');
+    gLabel.setAttribute('class', 'grid-label');
+    gLabel.textContent = '฿' + fmtNum(max * f);
+    svg.appendChild(gLabel);
+  });
 
   values.forEach((v, i) => {
     const slotX = i * barSlot;
@@ -935,87 +978,37 @@ function renderChart(){
     const g = document.createElementNS(svgNS, 'g');
     g.setAttribute('class', 'chart-bar');
 
-    if(v <= 0){
-      const track = document.createElementNS(svgNS, 'rect');
-      track.setAttribute('x', x);
-      track.setAttribute('y', padTop);
-      track.setAttribute('width', barW);
-      track.setAttribute('height', plotH);
-      track.setAttribute('rx', 6);
-      track.setAttribute('fill', 'rgba(255,255,255,0.05)');
-      if(isToday){
-        track.setAttribute('stroke', '#e8b04b');
-        track.setAttribute('stroke-width', '1.2');
-      }
-      g.appendChild(track);
-    } else if(isToday){
-      const marker = document.createElementNS(svgNS, 'rect');
-      marker.setAttribute('x', x);
-      marker.setAttribute('y', padTop);
-      marker.setAttribute('width', barW);
-      marker.setAttribute('height', plotH);
-      marker.setAttribute('rx', 6);
-      marker.setAttribute('fill', 'none');
-      marker.setAttribute('stroke', '#e8b04b');
-      marker.setAttribute('stroke-width', '1.2');
-      g.appendChild(marker);
-    }
+    // track: full-height rounded pill, always shown behind the fill
+    const track = document.createElementNS(svgNS, 'rect');
+    track.setAttribute('x', x);
+    track.setAttribute('y', padTop);
+    track.setAttribute('width', barW);
+    track.setAttribute('height', plotH);
+    track.setAttribute('rx', r);
+    track.setAttribute('class', 'chart-track');
+    g.appendChild(track);
 
-    const segData = CATEGORIES
-      .map(cat => ({ cat, amt: stacks[i][cat.id] || 0 }))
-      .filter(s => s.amt > 0);
     let barTopY = padTop + plotH;
-    if(segData.length){
-      let rawTotalH = 0;
-      segData.forEach(s => { s.h = Math.max((s.amt / max) * plotH, 3); rawTotalH += s.h; });
-      if(rawTotalH > plotH){
-        const scale = plotH / rawTotalH;
-        segData.forEach(s => s.h *= scale);
-        rawTotalH = plotH;
-      }
-      barTopY = padTop + plotH - rawTotalH;
+    if(v > 0){
+      const h = Math.max((v / max) * plotH, barW); // min height = barW so the bottom cap stays fully round
+      barTopY = padTop + plotH - h;
+      const fill = document.createElementNS(svgNS, 'rect');
+      fill.setAttribute('x', x);
+      fill.setAttribute('y', barTopY);
+      fill.setAttribute('width', barW);
+      fill.setAttribute('height', h);
+      fill.setAttribute('rx', r);
+      fill.setAttribute('class', isToday ? 'chart-fill-selected' : 'chart-fill-normal');
+      g.appendChild(fill);
     }
     g.dataset.bx = x + barW/2;
     g.dataset.by = barTopY;
-    if(segData.length){
-
-      const clipId = 'barclip-' + chartMode + '-' + i;
-      const clipPath = document.createElementNS(svgNS, 'clipPath');
-      clipPath.setAttribute('id', clipId);
-      const clipRect = document.createElementNS(svgNS, 'rect');
-      clipRect.setAttribute('x', x);
-      clipRect.setAttribute('y', barTopY);
-      clipRect.setAttribute('width', barW);
-      clipRect.setAttribute('height', (padTop + plotH) - barTopY);
-      clipRect.setAttribute('rx', 6);
-      clipPath.appendChild(clipRect);
-      svg.appendChild(clipPath);
-
-      const stackGroup = document.createElementNS(svgNS, 'g');
-      stackGroup.setAttribute('clip-path', `url(#${clipId})`);
-
-      let cumY = padTop + plotH;
-      segData.forEach(s => {
-        usedCatIds.add(s.cat.id);
-        cumY -= s.h;
-        const seg = document.createElementNS(svgNS, 'rect');
-        seg.setAttribute('x', x);
-        seg.setAttribute('y', cumY);
-        seg.setAttribute('width', barW);
-        seg.setAttribute('height', s.h);
-        seg.setAttribute('fill', s.cat.color);
-        stackGroup.appendChild(seg);
-      });
-      g.appendChild(stackGroup);
-    }
 
     const label = document.createElementNS(svgNS, 'text');
     label.setAttribute('x', slotX + barSlot / 2);
-    label.setAttribute('y', chartH - 8);
+    label.setAttribute('y', chartH - 6);
     label.setAttribute('text-anchor', 'middle');
-    label.setAttribute('font-size', '10');
-    label.setAttribute('font-family', 'JetBrains Mono, monospace');
-    label.setAttribute('fill', '#8891a0');
+    label.setAttribute('class', 'day-label' + (isToday ? ' today' : ''));
     label.textContent = labels[i];
     g.appendChild(label);
 
@@ -1026,34 +1019,13 @@ function renderChart(){
 
   wrap.appendChild(svg);
 
-  if(legend){
-    CATEGORIES.forEach(cat => {
-      if(!usedCatIds.has(cat.id)) return;
-      const item = document.createElement('div');
-      item.className = 'chart-legend-item';
-      item.innerHTML = `<span class="chart-legend-dot" style="background:${cat.color}"></span>${esc(cat.icon)} ${esc(cat.name)}`;
-      legend.appendChild(item);
-    });
-  }
-
   requestAnimationFrame(() => { wrap.scrollLeft = wrap.scrollWidth; });
 
   let selectedBarEl = null;
   function selectBar(g, i, label, val, catSums){
     if(selectedBarEl) selectedBarEl.classList.remove('selected');
-    const oldMarker = svg.querySelector('.bar-select-marker');
-    if(oldMarker) oldMarker.remove();
     g.classList.add('selected');
     selectedBarEl = g;
-    const bx = parseFloat(g.dataset.bx);
-    const by = parseFloat(g.dataset.by);
-    const marker = document.createElementNS(svgNS, 'circle');
-    marker.setAttribute('cx', bx);
-    marker.setAttribute('cy', Math.max(by - 7, 5));
-    marker.setAttribute('r', 3);
-    marker.setAttribute('fill', '#e8b04b');
-    marker.setAttribute('class', 'bar-select-marker');
-    svg.appendChild(marker);
     showDetail(label, val, catSums);
   }
 }
@@ -1070,14 +1042,16 @@ function showDetail(label, val, catSums){
   labelEl.textContent = label;
   totalEl.textContent = '฿' + fmtNum(val);
   rowsEl.innerHTML = '';
-  CATEGORIES.forEach(cat => {
-    const amt = (catSums && catSums[cat.id]) || 0;
-    if(amt <= 0) return;
-    const row = document.createElement('div');
-    row.className = 'chart-detail-row';
-    row.innerHTML = `<span class="name"><span class="dot" style="background:${cat.color}"></span>${esc(cat.icon)} ${esc(cat.name)}</span><span class="amt">฿${fmtNum(amt)}</span>`;
-    rowsEl.appendChild(row);
-  });
+  CATEGORIES
+    .map(cat => ({ cat, amt: (catSums && catSums[cat.id]) || 0 }))
+    .filter(s => s.amt > 0)
+    .sort((a, b) => b.amt - a.amt)
+    .forEach(({ cat, amt }) => {
+      const row = document.createElement('div');
+      row.className = 'chart-detail-row';
+      row.innerHTML = `<span class="name"><span class="dot" style="background:${cat.color}"></span>${esc(cat.icon)} ${esc(cat.name)}</span><span class="amt">฿${fmtNum(amt)}</span>`;
+      rowsEl.appendChild(row);
+    });
 }
 
 function hideDetail(){
