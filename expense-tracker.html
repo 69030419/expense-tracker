@@ -352,11 +352,6 @@
     padding:16px;
     margin-bottom:18px;
   }
-  .chart-head{
-    display:flex; align-items:center; justify-content:space-between;
-    margin-bottom:14px;
-  }
-  .chart-head .title{ font-size:14.5px; font-weight:600; }
   .chart-tabs{
     display:flex; gap:4px;
     background:var(--bg);
@@ -406,8 +401,6 @@
   .chart-bar{ cursor:pointer; }
   .chart-bar rect{ transition: fill .12s ease, opacity .12s ease; }
   .chart-svg-wrap:has(.chart-bar.selected) .chart-bar:not(.selected){ opacity:.55; }
-  .chart-avg-line{ stroke:var(--text-dim); stroke-dasharray:3,3; stroke-width:1; }
-  .chart-avg-label{ fill:var(--text-dim); font-size:9px; font-family:'JetBrains Mono', monospace; }
   .chart-track{ fill: rgba(255,255,255,0.06); }
   .chart-fill-normal{ fill: var(--gold-dim); transition: fill .12s ease; }
   .chart-fill-selected{ fill: var(--green); }
