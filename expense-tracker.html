@@ -407,6 +407,18 @@
   .chart-tooltip b{ color:var(--gold); }
   .chart-avg-line{ stroke:var(--text-dim); stroke-dasharray:3,3; stroke-width:1; }
   .chart-avg-label{ fill:var(--text-dim); font-size:9px; font-family:'JetBrains Mono', monospace; }
+  .chart-legend{
+    display:flex; flex-wrap:wrap; gap:10px 14px;
+    margin-top:14px; padding-top:12px;
+    border-top:1px solid var(--line);
+  }
+  .chart-legend-item{
+    display:flex; align-items:center; gap:6px;
+    font-size:11.5px; color:var(--text-dim);
+  }
+  .chart-legend-dot{
+    width:9px; height:9px; border-radius:3px; flex:none;
+  }
 </style>
 </head>
 <body>
@@ -452,6 +464,7 @@
     <div class="chart-svg-wrap" id="chartSvgWrap">
       <div id="chartTooltip" class="chart-tooltip"></div>
     </div>
+    <div class="chart-legend" id="chartLegend"></div>
   </div>
 
   <div class="section-title">ประวัติ</div>
@@ -470,12 +483,12 @@
 
 <script>
 const CATEGORIES = [
-  { id:'rice',   name:'ข้าว',   icon:'🍚' },
-  { id:'water',  name:'น้ำ',    icon:'💧' },
-  { id:'seven',  name:'เซเว่น', icon:'🏪' },
-  { id:'win',    name:'วิน',    icon:'🛵' },
-  { id:'laundry',name:'ซัก',    icon:'👕' },
-  { id:'other',  name:'อื่นๆ',  icon:'📦' },
+  { id:'rice',   name:'ข้าว',   icon:'🍚', color:'#e8b04b' },
+  { id:'water',  name:'น้ำ',    icon:'💧', color:'#5aa9e6' },
+  { id:'seven',  name:'เซเว่น', icon:'🏪', color:'#e6704f' },
+  { id:'win',    name:'วิน',    icon:'🛵', color:'#59c290' },
+  { id:'laundry',name:'ซัก',    icon:'👕', color:'#a68bd6' },
+  { id:'other',  name:'อื่นๆ',  icon:'📦', color:'#8f7a63' },
 ];
 const catMap = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
@@ -775,10 +788,32 @@ function renderMonthSelector(){
 
 /* ---------------- Chart ---------------- */
 
+function emptyCatSums(){
+  const s = {};
+  CATEGORIES.forEach(c => s[c.id] = 0);
+  return s;
+}
+
+// TrueMoney-style buckets: 1-5, 6-12, 13-19, 20-26, 27-end (works for any month length)
+function monthBuckets(y, m){ // m = 1-12
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const starts = [1,6,13,20,27];
+  const buckets = [];
+  starts.forEach((start, idx) => {
+    if(start > daysInMonth) return;
+    const nextStart = starts[idx+1] || (daysInMonth+1);
+    const end = Math.min(nextStart-1, daysInMonth);
+    buckets.push({start, end});
+  });
+  return buckets;
+}
+
 function renderChart(){
   const wrap = document.getElementById('chartSvgWrap');
   const tooltip = document.getElementById('chartTooltip');
+  const legend = document.getElementById('chartLegend');
   Array.from(wrap.children).forEach(ch => { if(ch.id !== 'chartTooltip') wrap.removeChild(ch); });
+  if(legend) legend.innerHTML = '';
 
   if(entries.length === 0){
     const empty = document.createElement('div');
@@ -791,6 +826,7 @@ function renderChart(){
   let labels = [];
   let values = [];
   let fullLabels = [];
+  let stacks = []; // per-bar { catId: amount }
 
   if(chartMode === 'daily'){
     const days = [];
@@ -802,25 +838,42 @@ function renderChart(){
       days.push(iso);
     }
     const byDate = {};
-    entries.forEach(e => { byDate[e.date] = (byDate[e.date] || 0) + e.amount; });
+    entries.forEach(e => {
+      if(!byDate[e.date]) byDate[e.date] = emptyCatSums();
+      const cid = catMap[e.category] ? e.category : 'other';
+      byDate[e.date][cid] += e.amount;
+    });
     days.forEach(iso => {
       const [y,m,d] = iso.split('-').map(Number);
+      const catSums = byDate[iso] || emptyCatSums();
+      const total = Object.values(catSums).reduce((s,v)=>s+v,0);
       labels.push(String(d));
       fullLabels.push(d + ' ' + THAI_MONTHS_SHORT[m-1] + (iso === todayISO() ? ' (วันนี้)' : ''));
-      values.push(byDate[iso] || 0);
+      values.push(total);
+      stacks.push(catSums);
     });
   } else {
-    const byMonth = {};
-    entries.forEach(e => {
-      const mk = monthKey(e.date);
-      byMonth[mk] = (byMonth[mk] || 0) + e.amount;
-    });
-    const mks = Object.keys(byMonth).sort((a,b) => a.localeCompare(b));
-    mks.forEach(mk => {
-      const [y,m] = mk.split('-').map(Number);
-      labels.push(THAI_MONTHS_SHORT[m-1]);
-      fullLabels.push(THAI_MONTHS_FULL[m-1] + ' ' + (y + 543));
-      values.push(byMonth[mk]);
+    let mk = selectedSummaryMonth;
+    if(mk === 'all' || !entries.some(e => monthKey(e.date) === mk)){
+      const mks = Array.from(new Set(entries.map(e => monthKey(e.date)))).sort((a,b) => b.localeCompare(a));
+      mk = mks[0] || monthKey(todayISO());
+    }
+    const [y,m] = mk.split('-').map(Number);
+    const buckets = monthBuckets(y, m);
+    buckets.forEach(b => {
+      const catSums = emptyCatSums();
+      entries.forEach(e => {
+        if(monthKey(e.date) !== mk) return;
+        const day = Number(e.date.slice(8,10));
+        if(day < b.start || day > b.end) return;
+        const cid = catMap[e.category] ? e.category : 'other';
+        catSums[cid] += e.amount;
+      });
+      const total = Object.values(catSums).reduce((s,v)=>s+v,0);
+      labels.push(b.start + '-' + b.end);
+      fullLabels.push(b.start + '-' + b.end + ' ' + THAI_MONTHS_SHORT[m-1]);
+      values.push(total);
+      stacks.push(catSums);
     });
   }
 
@@ -861,24 +914,66 @@ function renderChart(){
     svg.appendChild(avgLabel);
   }
 
+  const usedCatIds = new Set();
+
   values.forEach((v, i) => {
     const slotX = i * barSlot;
-    const barH = max > 0 ? (v / max) * plotH : 0;
     const x = slotX + (barSlot - barW) / 2;
-    const y = padTop + plotH - barH;
+    const isToday = chartMode === 'daily' && i === values.length - 1;
 
     const g = document.createElementNS(svgNS, 'g');
     g.setAttribute('class', 'chart-bar');
 
-    const rect = document.createElementNS(svgNS, 'rect');
-    rect.setAttribute('x', x);
-    rect.setAttribute('y', y);
-    rect.setAttribute('width', barW);
-    rect.setAttribute('height', Math.max(barH, v > 0 ? 2 : 0));
-    rect.setAttribute('rx', 5);
-    const isToday = chartMode === 'daily' && i === values.length - 1;
-    rect.setAttribute('fill', isToday ? '#e8b04b' : (v > 0 ? '#7a6636' : '#2c323d'));
-    g.appendChild(rect);
+    // background track (full height, light) so empty bars are still visible
+    const track = document.createElementNS(svgNS, 'rect');
+    track.setAttribute('x', x);
+    track.setAttribute('y', padTop);
+    track.setAttribute('width', barW);
+    track.setAttribute('height', plotH);
+    track.setAttribute('rx', 6);
+    track.setAttribute('fill', 'rgba(255,255,255,0.05)');
+    if(isToday){
+      track.setAttribute('stroke', '#e8b04b');
+      track.setAttribute('stroke-width', '1.2');
+    }
+    g.appendChild(track);
+
+    const totalH = max > 0 ? (v / max) * plotH : 0;
+    if(v > 0){
+      const barTopY = padTop + plotH - Math.max(totalH, 3);
+
+      const clipId = 'barclip-' + chartMode + '-' + i;
+      const clipPath = document.createElementNS(svgNS, 'clipPath');
+      clipPath.setAttribute('id', clipId);
+      const clipRect = document.createElementNS(svgNS, 'rect');
+      clipRect.setAttribute('x', x);
+      clipRect.setAttribute('y', barTopY);
+      clipRect.setAttribute('width', barW);
+      clipRect.setAttribute('height', (padTop + plotH) - barTopY);
+      clipRect.setAttribute('rx', 6);
+      clipPath.appendChild(clipRect);
+      svg.appendChild(clipPath);
+
+      const stackGroup = document.createElementNS(svgNS, 'g');
+      stackGroup.setAttribute('clip-path', `url(#${clipId})`);
+
+      let cumY = padTop + plotH;
+      CATEGORIES.forEach(cat => {
+        const amt = stacks[i][cat.id] || 0;
+        if(amt <= 0) return;
+        usedCatIds.add(cat.id);
+        const segH = (amt / max) * plotH;
+        cumY -= segH;
+        const seg = document.createElementNS(svgNS, 'rect');
+        seg.setAttribute('x', x);
+        seg.setAttribute('y', cumY);
+        seg.setAttribute('width', barW);
+        seg.setAttribute('height', segH);
+        seg.setAttribute('fill', cat.color);
+        stackGroup.appendChild(seg);
+      });
+      g.appendChild(stackGroup);
+    }
 
     const label = document.createElementNS(svgNS, 'text');
     label.setAttribute('x', slotX + barSlot / 2);
@@ -890,8 +985,8 @@ function renderChart(){
     label.textContent = labels[i];
     g.appendChild(label);
 
-    g.addEventListener('mouseenter', () => showTip(g, fullLabels[i], v));
-    g.addEventListener('touchstart', () => showTip(g, fullLabels[i], v), {passive:true});
+    g.addEventListener('mouseenter', () => showTip(g, fullLabels[i], v, stacks[i]));
+    g.addEventListener('touchstart', () => showTip(g, fullLabels[i], v, stacks[i]), {passive:true});
     g.addEventListener('mouseleave', hideTip);
 
     svg.appendChild(g);
@@ -899,15 +994,33 @@ function renderChart(){
 
   wrap.insertBefore(svg, tooltip);
 
+  if(legend){
+    CATEGORIES.forEach(cat => {
+      if(!usedCatIds.has(cat.id)) return;
+      const item = document.createElement('div');
+      item.className = 'chart-legend-item';
+      item.innerHTML = `<span class="chart-legend-dot" style="background:${cat.color}"></span>${esc(cat.icon)} ${esc(cat.name)}`;
+      legend.appendChild(item);
+    });
+  }
+
   if(chartMode === 'daily'){
     requestAnimationFrame(() => { wrap.scrollLeft = wrap.scrollWidth; });
   }
 
-  function showTip(g, label, val){
-    const rect = g.querySelector('rect');
-    const bx = parseFloat(rect.getAttribute('x')) + parseFloat(rect.getAttribute('width'))/2;
-    const by = parseFloat(rect.getAttribute('y'));
-    tooltip.innerHTML = `${esc(label)}<br><b>฿${fmtNum(val)}</b>`;
+  function showTip(g, label, val, catSums){
+    const track = g.querySelector('rect');
+    const bx = parseFloat(track.getAttribute('x')) + parseFloat(track.getAttribute('width'))/2;
+    const by = parseFloat(track.getAttribute('y'));
+    let breakdown = '';
+    if(catSums){
+      CATEGORIES.forEach(cat => {
+        const amt = catSums[cat.id] || 0;
+        if(amt <= 0) return;
+        breakdown += `<br>${esc(cat.icon)} ${esc(cat.name)} ฿${fmtNum(amt)}`;
+      });
+    }
+    tooltip.innerHTML = `${esc(label)}<br><b>฿${fmtNum(val)}</b>${breakdown}`;
     tooltip.style.left = bx + 'px';
     tooltip.style.top = by + 'px';
     tooltip.classList.add('show');
@@ -1232,6 +1345,7 @@ async function init(){
   document.getElementById('monthSelector').addEventListener('change', (e) => {
     selectedSummaryMonth = e.target.value;
     renderSummary();
+    if(chartMode === 'monthly') renderChart();
   });
 
   document.getElementById('exportBtn').addEventListener('click', exportData);
