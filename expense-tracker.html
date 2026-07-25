@@ -578,7 +578,6 @@ function seedData(){
     category: r[1],
     amount: r[2],
     note: r[3],
-    // ใช้ 'T00:00:00' (เวลา local) ให้สม่ำเสมอกับตอนแก้ไขวันที่ ไม่ใช่ new Date(r[0]) เฉยๆ ซึ่งตีความเป็น UTC
     ts: new Date(r[0]+'T00:00:00').getTime() + i
   }));
 }
@@ -613,7 +612,14 @@ function loadEntries(){
           firstLoad = false;
           resolve();
         } else {
-          renderAll();
+          /* ระหว่างแก้ไขรายการอยู่ (editingId ตั้งค่า) อย่า re-render ประวัติทับฟอร์มที่พิมพ์ค้างอยู่
+             แต่ยังอัปเดตยอดรวม/กราฟให้ตรงกับข้อมูลล่าสุดได้ */
+          if(editingId){
+            renderSummary();
+            renderChart();
+          } else {
+            renderAll();
+          }
         }
         updateOfflineBanner();
       },
@@ -929,7 +935,6 @@ function renderChart(){
     const g = document.createElementNS(svgNS, 'g');
     g.setAttribute('class', 'chart-bar');
 
-    // background track — only shown for empty bars (no data yet), so real bars aren't dwarfed by it
     if(v <= 0){
       const track = document.createElementNS(svgNS, 'rect');
       track.setAttribute('x', x);
@@ -956,7 +961,6 @@ function renderChart(){
       g.appendChild(marker);
     }
 
-    // pre-compute segment heights with a minimum visible height so small categories aren't invisible
     const segData = CATEGORIES
       .map(cat => ({ cat, amt: stacks[i][cat.id] || 0 }))
       .filter(s => s.amt > 0);
@@ -1336,12 +1340,8 @@ function renderSummary(){
 }
 
 function renderAll(){
-  // ถ้ากำลังแก้ไขรายการอยู่ ไม่ re-render ประวัติทับฟอร์มที่พิมพ์ค้างอยู่
-  // (กันกรณี snapshot จากเครื่องอื่นมาแทรกกลางทาง ทำให้สิ่งที่พิมพ์อยู่หาย)
   renderSummary();
-  if(!editingId){
-    renderHistory();
-  }
+  renderHistory();
   renderChart();
 }
 
