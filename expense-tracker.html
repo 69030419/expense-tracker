@@ -551,6 +551,11 @@ try{
   }
   firebase.initializeApp(firebaseConfig);
   db = firebase.firestore();
+  db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+    /* failed-precondition = เปิดหลายแท็บพร้อมกันแบบไม่ sync, unimplemented = เบราว์เซอร์ไม่รองรับ
+       ทั้งสองกรณีแอปยังใช้งานได้ปกติ แค่ไม่มี offline cache เท่านั้น */
+    console.warn('Firestore persistence not enabled:', err.code);
+  });
   docRef = db.collection('expense_data').doc('shared');
   firebaseAvailable = true;
 }catch(err){
@@ -561,6 +566,26 @@ try{
 let entries = [];
 let syncOk = firebaseAvailable;
 let hasLoadedOnce = false;
+/* baseline ล่าสุดที่ sync กับ server แล้ว ใช้ diff ตอนบันทึกกันข้อมูลชนกันเวลาเปิดหลายเครื่อง/แท็บพร้อมกัน */
+let lastSyncedEntries = [];
+
+/* merge สิ่งที่แก้ในเครื่องนี้ (เทียบกับ baseline) เข้ากับข้อมูลล่าสุดจาก server
+   แทนที่จะทับทั้งก้อน กันเคส 2 เครื่องแก้คนละรายการพร้อมกันแล้วข้อมูลหาย */
+function mergeEntries(serverEntries, localEntries, baseline){
+  const result = new Map(serverEntries.map(e => [e.id, e]));
+  const baselineIds = new Set(baseline.map(e => e.id));
+  const localIds = new Set(localEntries.map(e => e.id));
+
+  /* รายการที่มีอยู่ตอนนี้ในเครื่อง (เพิ่มใหม่ หรือแก้ไข) ให้ใช้ค่าจากเครื่องนี้ */
+  localEntries.forEach(e => result.set(e.id, e));
+
+  /* รายการที่เคยมีตอน baseline แต่เครื่องนี้ลบไปแล้ว ให้ลบออกจากผลลัพธ์ด้วย */
+  baselineIds.forEach(id => {
+    if(!localIds.has(id)) result.delete(id);
+  });
+
+  return Array.from(result.values());
+}
 
 function todayISO(){
   const d = new Date();
@@ -623,8 +648,10 @@ function loadEntries(){
         hasLoadedOnce = true;
         if(doc.exists && Array.isArray(doc.data().entries)){
           entries = doc.data().entries;
+          lastSyncedEntries = entries.slice();
         } else if(firstLoad){
           entries = seedData();
+          lastSyncedEntries = entries.slice();
           saveEntries();
         }
         if(firstLoad){
@@ -661,8 +688,21 @@ async function saveEntries(){
     updateOfflineBanner();
     return false;
   }
+  /* เก็บ snapshot ของสิ่งที่เครื่องนี้ต้องการบันทึก ก่อนจะไป get() ซึ่งอาจใช้เวลา
+     (กันเคส user กดแก้ไขต่ออีกรอบระหว่างรอ save แล้ว entries เปลี่ยนไปแล้ว) */
+  const localSnapshot = entries;
+  const baseline = lastSyncedEntries;
   try{
-    await docRef.set({ entries: entries, updatedAt: Date.now() });
+    const snap = await docRef.get();
+    const serverEntries = (snap.exists && Array.isArray(snap.data().entries)) ? snap.data().entries : [];
+    const merged = mergeEntries(serverEntries, localSnapshot, baseline);
+    await docRef.set({ entries: merged, updatedAt: Date.now() });
+    /* ถ้าไม่มีการแก้ไขเพิ่มระหว่างรอ save ให้ sync entries ในเครื่องให้ตรงกับผลลัพธ์ที่ merge แล้ว
+       (เผื่อมีรายการจากเครื่องอื่นที่เพิ่งเพิ่มเข้ามาด้วย) */
+    if(entries === localSnapshot){
+      entries = merged;
+    }
+    lastSyncedEntries = merged.slice();
     syncOk = true;
     updateOfflineBanner();
     return true;
@@ -754,7 +794,13 @@ async function confirmAdd(){
     showToast(saved
       ? `บันทึก ${catName}${note ? ' · '+note : ''} ฿${fmtNum(val)}`
       : `เพิ่มแล้ว (ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ)`);
-    renderAll();
+    /* กันเคสกำลังแก้ไขรายการอื่นค้างอยู่แล้วเพิ่มรายการใหม่ ไม่ให้ทับฟอร์มที่พิมพ์ค้าง */
+    if(editingId){
+      renderSummary();
+      renderChart();
+    } else {
+      renderAll();
+    }
   } finally {
     isAdding = false;
     confirmBtn.disabled = false;
@@ -765,7 +811,15 @@ function deleteEntry(id, rowEl){
   if(rowEl.dataset.confirming === '1'){
     entries = entries.filter(x => x.id !== id);
     saveEntries();
-    renderAll();
+    /* ถ้ากำลังแก้ไขรายการอื่นค้างอยู่ อย่า renderHistory ทับฟอร์มที่พิมพ์ค้างไว้
+       (ถ้าลบรายการที่กำลังแก้ไขอยู่พอดี ก็เคลียร์ editingId แล้ว render ตามปกติ) */
+    if(editingId && editingId !== id){
+      renderSummary();
+      renderChart();
+    } else {
+      if(editingId === id) editingId = null;
+      renderAll();
+    }
     return;
   }
   rowEl.dataset.confirming = '1';
