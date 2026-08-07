@@ -571,6 +571,19 @@ let hasLoadedOnce = false;
 /* baseline ล่าสุดที่ sync กับ server แล้ว ใช้ diff ตอนบันทึกกันข้อมูลชนกันเวลาเปิดหลายเครื่อง/แท็บพร้อมกัน */
 let lastSyncedEntries = [];
 
+/* กัน bug ร้ายแรง: .slice() เป็น shallow copy element ยังเป็น object เดียวกัน
+   ถ้า mutate entry ตรงๆ (เช่นตอน edit) จะไป mutate object ใน baseline ไปด้วย ทำให้ diff เทียบกับตัวเองเสมอ */
+function cloneEntries(list){
+  return list.map(e => ({...e}));
+}
+
+/* เทียบ field ตรงๆ แทน JSON.stringify เพราะลำดับ key ของ object ที่ได้จาก Firestore
+   อาจไม่ตรงกับ object literal ที่สร้างในเครื่อง ทำให้ stringify ต่างกันทั้งที่ค่าเหมือนกัน */
+function entryEquals(a, b){
+  return a.date === b.date && a.category === b.category &&
+         a.amount === b.amount && a.note === b.note && a.ts === b.ts;
+}
+
 /* merge สิ่งที่แก้ในเครื่องนี้ (เทียบกับ baseline) เข้ากับข้อมูลล่าสุดจาก server
    แทนที่จะทับทั้งก้อน กันเคส 2 เครื่องแก้คนละรายการพร้อมกันแล้วข้อมูลหาย */
 function mergeEntries(serverEntries, localEntries, baseline){
@@ -582,7 +595,7 @@ function mergeEntries(serverEntries, localEntries, baseline){
      รายการที่ไม่ได้แตะเลยให้ปล่อยตามค่าจาก server กันทับการแก้ไขของเครื่องอื่น */
   localEntries.forEach(e => {
     const base = baseMap.get(e.id);
-    const changed = !base || JSON.stringify(base) !== JSON.stringify(e);
+    const changed = !base || !entryEquals(base, e);
     if(changed) result.set(e.id, e);
   });
 
@@ -664,11 +677,16 @@ function loadEntries(){
            ห้ามเอามาตั้งเป็น baseline เพราะยังไม่ยืนยันว่า sync จริง ไม่งั้น merge ครั้งถัดไปจะพลาด */
         const isConfirmed = !doc.metadata.hasPendingWrites && !doc.metadata.fromCache;
         if(doc.exists && Array.isArray(doc.data().entries)){
-          entries = doc.data().entries;
-          if(isConfirmed) lastSyncedEntries = entries.slice();
+          const serverData = doc.data().entries;
+          /* merge แทนการทับตรงๆ กันรายการที่เพิ่ง add/edit ในเครื่องนี้แต่ sync ยังไม่เสร็จ
+             หายวับไปตอน snapshot จากอีกเครื่องมาถึงก่อน */
+          entries = mergeEntries(serverData, entries, lastSyncedEntries);
+          revision++;
+          if(isConfirmed) lastSyncedEntries = cloneEntries(serverData);
         } else if(firstLoad){
           entries = seedData();
-          lastSyncedEntries = entries.slice();
+          lastSyncedEntries = cloneEntries(entries);
+          revision++;
           saveEntries();
         }
         if(firstLoad){
@@ -694,27 +712,37 @@ function loadEntries(){
     );
   });
 }
-async function saveEntries(){
+let saveQueue = Promise.resolve();
+/* กัน race ตอน add/edit/delete ติดกันเร็วๆ: บังคับให้ save รันทีละตัวเรียงคิว
+   ไม่งั้น get()/set() หลายตัวจะสลับกันแล้ว baseline เพี้ยน */
+function saveEntries(){
+  const run = () => doSaveEntries();
+  saveQueue = saveQueue.then(run, run);
+  return saveQueue;
+}
+
+async function doSaveEntries(){
   if(!firebaseAvailable){
     syncOk = false;
     updateOfflineBanner();
     return false;
   }
-  /* เก็บ snapshot ของสิ่งที่เครื่องนี้ต้องการบันทึก ก่อนจะไป get() ซึ่งอาจใช้เวลา
-     (กันเคส user กดแก้ไขต่ออีกรอบระหว่างรอ save แล้ว entries เปลี่ยนไปแล้ว) */
-  const localSnapshot = entries;
+  /* clone ไว้ก่อน ไม่ใช้ reference ตรงๆ กัน entries ถูก mutate ระหว่างรอ network
+     ทำให้ diff กับ baseline ผิดพลาด (baseline ก็ clone ไว้แล้วตอนตั้งค่าเช่นกัน) */
+  const localSnapshot = cloneEntries(entries);
   const baseline = lastSyncedEntries;
+  const startRevision = revision;
   try{
     const snap = await withTimeout(docRef.get());
     const serverEntries = (snap.exists && Array.isArray(snap.data().entries)) ? snap.data().entries : [];
     const merged = mergeEntries(serverEntries, localSnapshot, baseline);
     await withTimeout(docRef.set({ entries: merged, updatedAt: Date.now() }));
-    /* ถ้าไม่มีการแก้ไขเพิ่มระหว่างรอ save ให้ sync entries ในเครื่องให้ตรงกับผลลัพธ์ที่ merge แล้ว
-       (เผื่อมีรายการจากเครื่องอื่นที่เพิ่งเพิ่มเข้ามาด้วย) */
-    if(entries === localSnapshot){
+    /* ถ้าไม่มีการแก้ไข/sync รอบใหม่เกิดขึ้นระหว่างรอ (revision ไม่เปลี่ยน) ค่อย sync entries
+       ในเครื่องให้ตรงกับผลลัพธ์ที่ merge แล้ว กันทับข้อมูลที่เพิ่งเปลี่ยนไปแล้วระหว่างรอ */
+    if(revision === startRevision){
       entries = merged;
     }
-    lastSyncedEntries = merged.slice();
+    lastSyncedEntries = cloneEntries(merged);
     syncOk = true;
     updateOfflineBanner();
     return true;
@@ -794,6 +822,7 @@ async function confirmAdd(){
     ts: Date.now()
   };
   entries.unshift(entry);
+  revision++;
 
   /* optimistic UI: เคลียร์ฟอร์ม + render ทันทีไม่ต้องรอ network
      (docRef.set ตอนออฟไลน์อาจค้างได้เป็นนาที ไม่ควรบล็อก UI) */
@@ -819,11 +848,15 @@ async function confirmAdd(){
 function deleteEntry(id, rowEl){
   if(rowEl.dataset.confirming === '1'){
     entries = entries.filter(x => x.id !== id);
+    revision++;
     if(editingId === id){ editingId = null; editDraft = null; }
-    saveEntries();
     /* editDraft เก็บค่าที่พิมพ์ค้างของฟอร์ม edit อื่นไว้แล้ว จึง render ทั้งประวัติได้ทันที
        ไม่ทิ้งแถวที่ลบไปแล้วค้างอยู่บนจอ */
     renderAll();
+    (async () => {
+      const ok = await saveEntries();
+      if(!ok) showToast('ลบแล้วแต่ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ');
+    })();
     return;
   }
   rowEl.dataset.confirming = '1';
@@ -846,6 +879,9 @@ let openMonthsInitialized = false;
 let monthFilters = {};
 let editingId = null;
 let editDraft = null; // { id, date, amount, note, category } - กันค่าที่พิมพ์ค้างหายตอน re-render
+/* นับทุกครั้งที่ entries ถูกแก้จากฝั่งนี้ (add/edit/delete/import) ใช้แทนการเทียบ reference
+   เพราะ add/edit บาง path mutate array/element ในที่เดิม ไม่ได้เปลี่ยน reference ของ entries เลย */
+let revision = 0;
 let chartMode = 'weekly';
 let selectedSummaryMonth = 'all'; // 'all' or 'YYYY-MM'
 let summarySelectorInitialized = false;
@@ -1313,25 +1349,36 @@ function buildEntryRow(e){
       const newAmt = parseFloat(amountInput.value);
       const newNote = noteInput.value.trim();
       const newDate = dateInput.value;
-      if(!newAmt || newAmt <= 0) return;
-      if(!newDate) return;
-      const target = entries.find(x => x.id === e.id);
-      if(target){
-        const oldMidnight = new Date(target.date + 'T00:00:00').getTime();
-        let timeOffset = target.ts - oldMidnight;
-        if(isNaN(timeOffset) || timeOffset < 0) timeOffset = 0;
-
-        target.amount = newAmt;
-        target.note = newNote;
-        target.category = draft.category;
-        target.date = newDate;
-
-        const newMidnight = new Date(newDate + 'T00:00:00').getTime();
-        target.ts = newMidnight + timeOffset;
-      } else {
+      if(!newAmt || newAmt <= 0){ showToast('ใส่จำนวนเงินให้ถูกต้องก่อน'); return; }
+      if(!newDate){ showToast('เลือกวันที่ก่อน'); return; }
+      const idx = entries.findIndex(x => x.id === e.id);
+      if(idx === -1){
         /* รายการนี้ถูกลบไปแล้ว (เช่น จากอีกเครื่อง) ระหว่างที่กำลังแก้ไขอยู่ */
         showToast('รายการนี้ถูกลบไปแล้ว เลยบันทึกไม่ได้');
+        editingId = null;
+        editDraft = null;
+        renderAll();
+        return;
       }
+      const oldEntry = entries[idx];
+      const oldMidnight = new Date(oldEntry.date + 'T00:00:00').getTime();
+      let timeOffset = oldEntry.ts - oldMidnight;
+      if(isNaN(timeOffset) || timeOffset < 0) timeOffset = 0;
+      const newMidnight = new Date(newDate + 'T00:00:00').getTime();
+
+      /* สร้าง object/array ใหม่แทนการ mutate ตรงๆ กันไป mutate object เดียวกับที่อยู่ใน
+         lastSyncedEntries (baseline) ด้วย ซึ่งจะทำให้ diff ตอน merge เทียบกับตัวเองแล้วไม่เห็นว่าเปลี่ยน */
+      const updated = {
+        ...oldEntry,
+        amount: newAmt,
+        note: newNote,
+        category: draft.category,
+        date: newDate,
+        ts: newMidnight + timeOffset
+      };
+      entries = entries.map((x, i) => i === idx ? updated : x);
+      revision++;
+
       editingId = null;
       editDraft = null;
       await saveEntries();
@@ -1445,6 +1492,7 @@ function importData(file){
         addedCount++;
       });
       entries = merged;
+      revision++;
       await saveEntries();
       renderAll();
       showToast(skippedCount > 0
