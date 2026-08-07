@@ -526,6 +526,8 @@ const CATEGORIES = [
   { id:'other',  name:'อื่นๆ',  icon:'📦', color:'#8f7a63' },
 ];
 const catMap = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
+/* กัน category เพี้ยน (ข้อมูลเก่า/แก้มือ/sync ผิดเวอร์ชัน) ทำให้ .icon/.name เป็น undefined แล้ว crash ทั้งหน้า */
+function getCat(id){ return catMap[id] || catMap.other; }
 
 /* ปลอดภัยจาก XSS: escape ก่อนแทรกลง innerHTML ทุกจุดที่มาจากข้อมูล user (เช่น note) */
 function esc(s){
@@ -573,18 +575,30 @@ let lastSyncedEntries = [];
    แทนที่จะทับทั้งก้อน กันเคส 2 เครื่องแก้คนละรายการพร้อมกันแล้วข้อมูลหาย */
 function mergeEntries(serverEntries, localEntries, baseline){
   const result = new Map(serverEntries.map(e => [e.id, e]));
-  const baselineIds = new Set(baseline.map(e => e.id));
+  const baseMap = new Map(baseline.map(e => [e.id, e]));
   const localIds = new Set(localEntries.map(e => e.id));
 
-  /* รายการที่มีอยู่ตอนนี้ในเครื่อง (เพิ่มใหม่ หรือแก้ไข) ให้ใช้ค่าจากเครื่องนี้ */
-  localEntries.forEach(e => result.set(e.id, e));
+  /* override เฉพาะรายการที่เครื่องนี้ "เพิ่มใหม่" หรือ "แก้ไขจริง" (ต่างจาก baseline)
+     รายการที่ไม่ได้แตะเลยให้ปล่อยตามค่าจาก server กันทับการแก้ไขของเครื่องอื่น */
+  localEntries.forEach(e => {
+    const base = baseMap.get(e.id);
+    const changed = !base || JSON.stringify(base) !== JSON.stringify(e);
+    if(changed) result.set(e.id, e);
+  });
 
   /* รายการที่เคยมีตอน baseline แต่เครื่องนี้ลบไปแล้ว ให้ลบออกจากผลลัพธ์ด้วย */
-  baselineIds.forEach(id => {
+  baseMap.forEach((_, id) => {
     if(!localIds.has(id)) result.delete(id);
   });
 
   return Array.from(result.values());
+}
+
+function withTimeout(p, ms = 6000){
+  return Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('save timeout')), ms))
+  ]);
 }
 
 function todayISO(){
@@ -646,9 +660,12 @@ function loadEntries(){
       (doc) => {
         syncOk = true;
         hasLoadedOnce = true;
+        /* snapshot ที่มี pending write (ยังไม่ถึง server) หรือมาจาก local cache ล้วนๆ
+           ห้ามเอามาตั้งเป็น baseline เพราะยังไม่ยืนยันว่า sync จริง ไม่งั้น merge ครั้งถัดไปจะพลาด */
+        const isConfirmed = !doc.metadata.hasPendingWrites && !doc.metadata.fromCache;
         if(doc.exists && Array.isArray(doc.data().entries)){
           entries = doc.data().entries;
-          lastSyncedEntries = entries.slice();
+          if(isConfirmed) lastSyncedEntries = entries.slice();
         } else if(firstLoad){
           entries = seedData();
           lastSyncedEntries = entries.slice();
@@ -658,14 +675,9 @@ function loadEntries(){
           firstLoad = false;
           resolve();
         } else {
-          /* ระหว่างแก้ไขรายการอยู่ (editingId ตั้งค่า) อย่า re-render ประวัติทับฟอร์มที่พิมพ์ค้างอยู่
-             แต่ยังอัปเดตยอดรวม/กราฟให้ตรงกับข้อมูลล่าสุดได้ */
-          if(editingId){
-            renderSummary();
-            renderChart();
-          } else {
-            renderAll();
-          }
+          /* editDraft เก็บค่าที่พิมพ์ค้างไว้แยกจาก DOM แล้ว จึง re-render ทั้งประวัติได้ปลอดภัย
+             แม้กำลังแก้ไขรายการอยู่ */
+          renderAll();
         }
         updateOfflineBanner();
       },
@@ -693,10 +705,10 @@ async function saveEntries(){
   const localSnapshot = entries;
   const baseline = lastSyncedEntries;
   try{
-    const snap = await docRef.get();
+    const snap = await withTimeout(docRef.get());
     const serverEntries = (snap.exists && Array.isArray(snap.data().entries)) ? snap.data().entries : [];
     const merged = mergeEntries(serverEntries, localSnapshot, baseline);
-    await docRef.set({ entries: merged, updatedAt: Date.now() });
+    await withTimeout(docRef.set({ entries: merged, updatedAt: Date.now() }));
     /* ถ้าไม่มีการแก้ไขเพิ่มระหว่างรอ save ให้ sync entries ในเครื่องให้ตรงกับผลลัพธ์ที่ merge แล้ว
        (เผื่อมีรายการจากเครื่องอื่นที่เพิ่งเพิ่มเข้ามาด้วย) */
     if(entries === localSnapshot){
@@ -771,35 +783,32 @@ async function confirmAdd(){
   const confirmBtn = document.getElementById('confirmAddBtn');
   confirmBtn.disabled = true;
 
+  const note = noteInput.value.trim();
+  const catName = catMap[selectedCat].name;
+  const entry = {
+    id: Date.now() + '-' + Math.random().toString(36).slice(2,7),
+    date: todayISO(),
+    category: selectedCat,
+    amount: val,
+    note: note,
+    ts: Date.now()
+  };
+  entries.unshift(entry);
+
+  /* optimistic UI: เคลียร์ฟอร์ม + render ทันทีไม่ต้องรอ network
+     (docRef.set ตอนออฟไลน์อาจค้างได้เป็นนาที ไม่ควรบล็อก UI) */
+  input.value = '';
+  noteInput.value = '';
+  selectedCat = null;
+  document.querySelectorAll('.cat-btn').forEach(el => el.classList.remove('armed'));
+  updateConfirmButton();
+  renderAll();
+  showToast(`บันทึก ${catName}${note ? ' · '+note : ''} ฿${fmtNum(val)}`);
+
   try{
-    const note = noteInput.value.trim();
-    const entry = {
-      id: Date.now() + '-' + Math.random().toString(36).slice(2,7),
-      date: todayISO(),
-      category: selectedCat,
-      amount: val,
-      note: note,
-      ts: Date.now()
-    };
-    entries.unshift(entry);
     const saved = await saveEntries();
-
-    const catName = catMap[selectedCat].name;
-    input.value = '';
-    noteInput.value = '';
-    selectedCat = null;
-    document.querySelectorAll('.cat-btn').forEach(el => el.classList.remove('armed'));
-    updateConfirmButton();
-
-    showToast(saved
-      ? `บันทึก ${catName}${note ? ' · '+note : ''} ฿${fmtNum(val)}`
-      : `เพิ่มแล้ว (ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ)`);
-    /* กันเคสกำลังแก้ไขรายการอื่นค้างอยู่แล้วเพิ่มรายการใหม่ ไม่ให้ทับฟอร์มที่พิมพ์ค้าง */
-    if(editingId){
-      renderSummary();
-      renderChart();
-    } else {
-      renderAll();
+    if(!saved){
+      showToast('เพิ่มแล้ว (ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ)');
     }
   } finally {
     isAdding = false;
@@ -810,16 +819,11 @@ async function confirmAdd(){
 function deleteEntry(id, rowEl){
   if(rowEl.dataset.confirming === '1'){
     entries = entries.filter(x => x.id !== id);
+    if(editingId === id){ editingId = null; editDraft = null; }
     saveEntries();
-    /* ถ้ากำลังแก้ไขรายการอื่นค้างอยู่ อย่า renderHistory ทับฟอร์มที่พิมพ์ค้างไว้
-       (ถ้าลบรายการที่กำลังแก้ไขอยู่พอดี ก็เคลียร์ editingId แล้ว render ตามปกติ) */
-    if(editingId && editingId !== id){
-      renderSummary();
-      renderChart();
-    } else {
-      if(editingId === id) editingId = null;
-      renderAll();
-    }
+    /* editDraft เก็บค่าที่พิมพ์ค้างของฟอร์ม edit อื่นไว้แล้ว จึง render ทั้งประวัติได้ทันที
+       ไม่ทิ้งแถวที่ลบไปแล้วค้างอยู่บนจอ */
+    renderAll();
     return;
   }
   rowEl.dataset.confirming = '1';
@@ -841,6 +845,7 @@ let openMonths = new Set();
 let openMonthsInitialized = false;
 let monthFilters = {};
 let editingId = null;
+let editDraft = null; // { id, date, amount, note, category } - กันค่าที่พิมพ์ค้างหายตอน re-render
 let chartMode = 'weekly';
 let selectedSummaryMonth = 'all'; // 'all' or 'YYYY-MM'
 let summarySelectorInitialized = false;
@@ -1122,6 +1127,14 @@ function initChartTabs(){
 
 function renderHistory(){
   const container = document.getElementById('history');
+
+  if(editingId && !entries.some(x => x.id === editingId)){
+    /* รายการที่กำลังแก้ไขอยู่โดนลบไปแล้ว (เช่น จากอีกเครื่อง) แจ้งแทนที่จะปิดฟอร์มเงียบๆ */
+    editingId = null;
+    editDraft = null;
+    showToast('รายการนี้ถูกลบไปแล้ว');
+  }
+
   container.innerHTML = '';
 
   if(entries.length === 0){
@@ -1183,7 +1196,7 @@ function renderHistory(){
       const chipsRow = document.createElement('div');
       chipsRow.className = 'chips-row';
       catOrder.forEach(catId => {
-        const cat = catMap[catId];
+        const cat = getCat(catId);
         const chip = document.createElement('div');
         chip.className = 'chip' + (activeFilter === catId ? ' active' : '');
         chip.innerHTML = `${cat.icon} ${esc(cat.name)} <span class="chip-amt mono">฿${fmtNum(catTotals[catId])}</span>`;
@@ -1240,25 +1253,31 @@ function renderHistory(){
 }
 
 function buildEntryRow(e){
-  const cat = catMap[e.category];
+  const cat = getCat(e.category);
   const row = document.createElement('div');
   row.className = 'entry';
 
   if(editingId === e.id){
     row.classList.add('editing');
+    /* ถ้ามี draft ค้างของรายการนี้อยู่แล้ว (จากการ re-render ระหว่างพิมพ์) ใช้ค่านั้นแทนค่าเดิมจาก entry */
+    const draft = (editDraft && editDraft.id === e.id)
+      ? editDraft
+      : { id: e.id, date: e.date, amount: e.amount, note: e.note, category: e.category };
+    editDraft = draft;
+
     const catIcons = CATEGORIES.map(c => `
-      <div class="mini-cat ${c.id === e.category ? 'sel' : ''}" data-cat="${c.id}">${c.icon}</div>
+      <div class="mini-cat ${c.id === draft.category ? 'sel' : ''}" data-cat="${c.id}">${c.icon}</div>
     `).join('');
     row.innerHTML = `
       <div class="edit-form">
         <div class="edit-date-row">
           <span class="cal-ic">📅</span>
-          <input class="edit-date mono" type="date" value="${esc(e.date)}" />
+          <input class="edit-date mono" type="date" value="${esc(draft.date)}" />
         </div>
         <div class="edit-row1">
           <span class="baht">฿</span>
-          <input class="edit-amount mono" type="number" inputmode="decimal" value="${esc(e.amount)}" />
-          <input class="edit-note" type="text" placeholder="รายละเอียด" value="${esc(e.note)}" />
+          <input class="edit-amount mono" type="number" inputmode="decimal" value="${esc(draft.amount)}" />
+          <input class="edit-note" type="text" placeholder="รายละเอียด" value="${esc(draft.note)}" />
         </div>
         <div class="mini-cat-row">${catIcons}</div>
         <div class="edit-actions">
@@ -1267,11 +1286,18 @@ function buildEntryRow(e){
         </div>
       </div>
     `;
-    let tempCat = e.category;
+    const dateInput = row.querySelector('.edit-date');
+    const amountInput = row.querySelector('.edit-amount');
+    const noteInput = row.querySelector('.edit-note');
+    /* sync ค่าที่พิมพ์เข้า draft ทันที กัน re-render (sync จากเครื่องอื่น/เพิ่ม-ลบรายการอื่น) ทับค่าที่พิมพ์ค้างอยู่ */
+    dateInput.addEventListener('input', () => { draft.date = dateInput.value; });
+    amountInput.addEventListener('input', () => { draft.amount = amountInput.value; });
+    noteInput.addEventListener('input', () => { draft.note = noteInput.value; });
+
     row.querySelectorAll('.mini-cat').forEach(el => {
       el.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        tempCat = el.dataset.cat;
+        draft.category = el.dataset.cat;
         row.querySelectorAll('.mini-cat').forEach(x => x.classList.remove('sel'));
         el.classList.add('sel');
       });
@@ -1279,13 +1305,14 @@ function buildEntryRow(e){
     row.querySelector('.cancel').addEventListener('click', (ev) => {
       ev.stopPropagation();
       editingId = null;
+      editDraft = null;
       renderHistory();
     });
     row.querySelector('.save').addEventListener('click', async (ev) => {
       ev.stopPropagation();
-      const newAmt = parseFloat(row.querySelector('.edit-amount').value);
-      const newNote = row.querySelector('.edit-note').value.trim();
-      const newDate = row.querySelector('.edit-date').value;
+      const newAmt = parseFloat(amountInput.value);
+      const newNote = noteInput.value.trim();
+      const newDate = dateInput.value;
       if(!newAmt || newAmt <= 0) return;
       if(!newDate) return;
       const target = entries.find(x => x.id === e.id);
@@ -1296,13 +1323,17 @@ function buildEntryRow(e){
 
         target.amount = newAmt;
         target.note = newNote;
-        target.category = tempCat;
+        target.category = draft.category;
         target.date = newDate;
 
         const newMidnight = new Date(newDate + 'T00:00:00').getTime();
         target.ts = newMidnight + timeOffset;
+      } else {
+        /* รายการนี้ถูกลบไปแล้ว (เช่น จากอีกเครื่อง) ระหว่างที่กำลังแก้ไขอยู่ */
+        showToast('รายการนี้ถูกลบไปแล้ว เลยบันทึกไม่ได้');
       }
       editingId = null;
+      editDraft = null;
       await saveEntries();
       renderAll();
     });
@@ -1410,6 +1441,7 @@ function importData(file){
           note: typeof item.note === 'string' ? item.note : '',
           ts: Number.isFinite(item.ts) ? item.ts : new Date(item.date + 'T00:00:00').getTime()
         });
+        existingIds.add(item.id);
         addedCount++;
       });
       entries = merged;
