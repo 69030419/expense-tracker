@@ -581,7 +581,9 @@ function cloneEntries(list){
    อาจไม่ตรงกับ object literal ที่สร้างในเครื่อง ทำให้ stringify ต่างกันทั้งที่ค่าเหมือนกัน */
 function entryEquals(a, b){
   return a.date === b.date && a.category === b.category &&
-         a.amount === b.amount && a.note === b.note && a.ts === b.ts;
+         Number(a.amount) === Number(b.amount) &&
+         (a.note || '') === (b.note || '') &&
+         a.ts === b.ts;
 }
 
 /* merge สิ่งที่แก้ในเครื่องนี้ (เทียบกับ baseline) เข้ากับข้อมูลล่าสุดจาก server
@@ -673,20 +675,20 @@ function loadEntries(){
       (doc) => {
         syncOk = true;
         hasLoadedOnce = true;
-        /* snapshot ที่มี pending write (ยังไม่ถึง server) หรือมาจาก local cache ล้วนๆ
-           ห้ามเอามาตั้งเป็น baseline เพราะยังไม่ยืนยันว่า sync จริง ไม่งั้น merge ครั้งถัดไปจะพลาด */
-        const isConfirmed = !doc.metadata.hasPendingWrites && !doc.metadata.fromCache;
+        /* snapshot ที่มี pending write ของเราเอง (ยังไม่ถึง server) ห้ามเอามาตั้งเป็น baseline
+           แต่ snapshot จาก local cache (fromCache) ใช้เป็น baseline ได้ตามปกติ เพราะตอนเปิด
+           enablePersistence ไว้ snapshot แรกที่ได้มักมาจาก cache เสมอ ถ้ารอ !fromCache
+           baseline จะค้างเป็น [] ตลอด ทำให้ diff ตอน merge มองว่าไม่มีอะไรถูกลบเลย */
+        const canUseAsBaseline = !doc.metadata.hasPendingWrites;
         if(doc.exists && Array.isArray(doc.data().entries)){
           const serverData = doc.data().entries;
           /* merge แทนการทับตรงๆ กันรายการที่เพิ่ง add/edit ในเครื่องนี้แต่ sync ยังไม่เสร็จ
              หายวับไปตอน snapshot จากอีกเครื่องมาถึงก่อน */
           entries = mergeEntries(serverData, entries, lastSyncedEntries);
-          revision++;
-          if(isConfirmed) lastSyncedEntries = cloneEntries(serverData);
+          if(canUseAsBaseline) lastSyncedEntries = cloneEntries(serverData);
         } else if(firstLoad){
           entries = seedData();
           lastSyncedEntries = cloneEntries(entries);
-          revision++;
           saveEntries();
         }
         if(firstLoad){
@@ -845,8 +847,13 @@ async function confirmAdd(){
   }
 }
 
-function deleteEntry(id, rowEl){
-  if(rowEl.dataset.confirming === '1'){
+let pendingDeleteId = null;
+let pendingDeleteTimer = null;
+
+function deleteEntry(id){
+  if(pendingDeleteId === id){
+    clearTimeout(pendingDeleteTimer);
+    pendingDeleteId = null;
     entries = entries.filter(x => x.id !== id);
     revision++;
     if(editingId === id){ editingId = null; editDraft = null; }
@@ -859,17 +866,18 @@ function deleteEntry(id, rowEl){
     })();
     return;
   }
-  rowEl.dataset.confirming = '1';
-  const delBtn = rowEl.querySelector('.del');
-  delBtn.textContent = 'ลบ?';
-  delBtn.classList.add('confirming');
-  setTimeout(() => {
-    if(rowEl.isConnected && rowEl.dataset.confirming === '1'){
-      rowEl.dataset.confirming = '0';
-      delBtn.textContent = '✕';
-      delBtn.classList.remove('confirming');
+  /* เก็บสถานะ "กำลังจะลบ" ไว้ใน state แทน DOM dataset เพราะถ้า remote snapshot มาถึง
+     ระหว่างรอผู้ใช้กดยืนยัน renderAll() จะสร้าง DOM ใหม่ทั้งหมด dataset เดิมหายไปเฉยๆ
+     ทำให้ต้องกดใหม่ตั้งแต่ต้นโดยไม่รู้ตัว state ตัวแปรนี้รอดจาก re-render */
+  pendingDeleteId = id;
+  clearTimeout(pendingDeleteTimer);
+  pendingDeleteTimer = setTimeout(() => {
+    if(pendingDeleteId === id){
+      pendingDeleteId = null;
+      renderHistory();
     }
   }, 2200);
+  renderHistory();
 }
 
 const THAI_MONTHS_FULL = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
@@ -1378,15 +1386,21 @@ function buildEntryRow(e){
       };
       entries = entries.map((x, i) => i === idx ? updated : x);
       revision++;
-
       editingId = null;
       editDraft = null;
-      await saveEntries();
+
+      /* render ทันทีแบบ optimistic เหมือน confirmAdd ไม่ต้องรอ network
+         (docRef.set ตอนเน็ตช้า/ออฟไลน์อาจค้างได้หลายวิ ไม่ควรบล็อกฟอร์มไว้) */
       renderAll();
+      const saved = await saveEntries();
+      if(!saved){
+        showToast('แก้ไขแล้ว (ยังไม่บันทึกถาวร - เช็คการเชื่อมต่อ)');
+      }
     });
     return row;
   }
 
+  const isPendingDelete = pendingDeleteId === e.id;
   row.innerHTML = `
     <div class="left">
       <div class="ic">${cat.icon}</div>
@@ -1394,10 +1408,10 @@ function buildEntryRow(e){
     </div>
     <div style="display:flex;align-items:center;">
       <div class="amt mono">฿${fmtNum(e.amount)}</div>
-      <div class="del">✕</div>
+      <div class="del${isPendingDelete ? ' confirming' : ''}">${isPendingDelete ? 'ลบ?' : '✕'}</div>
     </div>
   `;
-  row.querySelector('.del').addEventListener('click', (ev) => { ev.stopPropagation(); deleteEntry(e.id, row); });
+  row.querySelector('.del').addEventListener('click', (ev) => { ev.stopPropagation(); deleteEntry(e.id); });
   row.addEventListener('click', () => {
     editingId = e.id;
     renderHistory();
